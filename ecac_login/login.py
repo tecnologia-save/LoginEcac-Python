@@ -9,6 +9,7 @@ Pre-requisitos no .env do projeto chamador:
     CERT_PFX_PASSPHRASE=senha-do-pfx
     GEMINI_API_KEY=chave-gemini
 """
+import json
 import os
 from pathlib import Path
 
@@ -49,6 +50,29 @@ CERT_ORIGINS = [
     "https://receita.fazenda.gov.br",
     "https://www.receita.fazenda.gov.br",
 ]
+
+
+def _configurar_download(user_data_dir: str) -> None:
+    """Configura o diretório de download do perfil Chrome para a pasta Downloads do usuário."""
+    downloads_dir = str(Path.home() / "Downloads")
+    prefs_dir = Path(user_data_dir) / "Default"
+    prefs_dir.mkdir(parents=True, exist_ok=True)
+    prefs_file = prefs_dir / "Preferences"
+
+    try:
+        prefs = json.loads(prefs_file.read_text(encoding="utf-8")) if prefs_file.exists() else {}
+    except Exception:
+        prefs = {}
+
+    prefs.setdefault("download", {})
+    prefs["download"]["default_directory"] = downloads_dir
+    prefs["download"]["prompt_for_download"] = False
+    prefs["download"]["directory_upgrade"] = True
+    prefs.setdefault("savefile", {})
+    prefs["savefile"]["default_directory"] = downloads_dir
+
+    prefs_file.write_text(json.dumps(prefs), encoding="utf-8")
+    print(f"[download] Diretorio configurado: {downloads_dir}")
 
 
 def _build_client_certificates(project_dir: Path):
@@ -103,6 +127,7 @@ def main(cnpj: str, project_dir: Path | str = None):
     user_data_dir = str(project_dir / "chrome_debug_profile")
     os.makedirs(user_data_dir, exist_ok=True)
 
+    _configurar_download(user_data_dir)
     client_certs = _build_client_certificates(project_dir)
 
     launch_kwargs = dict(
@@ -111,6 +136,7 @@ def main(cnpj: str, project_dir: Path | str = None):
         headless=False,
         no_viewport=True,
         ignore_https_errors=True,
+        accept_downloads=True,
         args=["--start-maximized", "--remote-debugging-port=9222"],
     )
     if client_certs:
