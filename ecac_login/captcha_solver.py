@@ -8,6 +8,8 @@ from google import genai
 from google.genai import types
 from patchright.sync_api import Page, TimeoutError as PWTimeoutError
 
+from .log_manager import registrar_erro
+
 
 CHALLENGE_IFRAME_SELECTOR = "iframe[src*='hcaptcha.com'][src*='frame=challenge']"
 CLICK_SELECTOR  = ".task"
@@ -171,7 +173,10 @@ def solve_hcaptcha(page: Page, max_rounds: int = 6) -> bool:
                 result = _classify_with_gemini(png)
             except Exception as e:
                 last_err = e
-                print(f"[captcha] tentativa {attempt}/5 — erro Gemini: {str(e)[:200]}")
+                tipo = type(e).__name__
+                detalhe = str(e)
+                print(f"[captcha] tentativa {attempt}/5 — erro Gemini ({tipo}): {detalhe[:300]}")
+                registrar_erro(f"Captcha: erro Gemini na tentativa {attempt}/5 — {tipo}: {detalhe}")
                 time.sleep(1)
                 continue
 
@@ -184,7 +189,11 @@ def solve_hcaptcha(page: Page, max_rounds: int = 6) -> bool:
             break
 
         if result is None:
+            tipo = type(last_err).__name__ if last_err else "desconhecido"
+            detalhe = str(last_err) if last_err else "sem detalhes"
+            msg = f"Captcha: todas as tentativas falharam na rodada {round_idx + 1} — {tipo}: {detalhe}"
             print(f"[captcha] Nao foi possivel classificar. Ultimo erro: {last_err}")
+            registrar_erro(msg)
             input("Resolva manualmente e pressione ENTER para continuar...")
             return True
 
