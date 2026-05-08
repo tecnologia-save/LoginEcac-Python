@@ -146,6 +146,21 @@ def main(cnpj: str, project_dir: Path | str = None):
     print("Lancando Chrome...")
     context = p.chromium.launch_persistent_context(**launch_kwargs)
     print("Chrome lancado.")
+
+    _downloads_dir = Path.home() / "Downloads"
+
+    def _salvar_download(download):
+        import time as _time
+        nome = download.suggested_filename or f"download_{int(_time.time())}"
+        destino = _downloads_dir / nome
+        try:
+            download.save_as(str(destino))
+            print(f"[download] Salvo em: {destino}")
+        except Exception as e:
+            print(f"[download] Erro ao salvar '{nome}': {e}")
+
+    context.on("download", _salvar_download)
+
     page = context.pages[0] if context.pages else context.new_page()
     print("Pagina obtida.")
 
