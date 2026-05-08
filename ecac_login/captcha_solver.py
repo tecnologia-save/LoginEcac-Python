@@ -68,7 +68,7 @@ _gemini_client: genai.Client | None = None
 def _get_client() -> genai.Client:
     global _gemini_client
     if _gemini_client is None:
-        load_dotenv(override=False)
+        load_dotenv(override=True)
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key or api_key.startswith("cole-"):
             raise RuntimeError("GEMINI_API_KEY nao configurada no .env.")

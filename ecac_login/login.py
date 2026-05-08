@@ -51,8 +51,8 @@ CERT_ORIGINS = [
 ]
 
 
-def _build_client_certificates():
-    load_dotenv(override=False)
+def _build_client_certificates(project_dir: Path):
+    load_dotenv(dotenv_path=project_dir / ".env", override=True)
     cert_path = os.environ.get("CERT_PFX_PATH")
     cert_pass = os.environ.get("CERT_PFX_PASSPHRASE")
     if not cert_path or not cert_pass:
@@ -98,10 +98,12 @@ def main(cnpj: str, project_dir: Path | str = None):
         project_dir = Path.cwd()
     project_dir = Path(project_dir)
 
+    load_dotenv(dotenv_path=project_dir / ".env", override=True)
+
     user_data_dir = str(project_dir / "chrome_debug_profile")
     os.makedirs(user_data_dir, exist_ok=True)
 
-    client_certs = _build_client_certificates()
+    client_certs = _build_client_certificates(project_dir)
 
     launch_kwargs = dict(
         user_data_dir=user_data_dir,
