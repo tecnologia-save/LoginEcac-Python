@@ -32,9 +32,6 @@ MENSAGEM_ACESSO_BLOQUEADO = (
 class AcessoBloqueado(Exception):
     pass
 
-CERT_PFX_PATH = os.environ.get("CERT_PFX_PATH")
-CERT_PFX_PASSPHRASE = os.environ.get("CERT_PFX_PASSPHRASE")
-
 CERT_ORIGINS = [
     "https://certificado.sso.acesso.gov.br",
     "https://sso.acesso.gov.br",
@@ -55,15 +52,18 @@ CERT_ORIGINS = [
 
 
 def _build_client_certificates():
-    if not CERT_PFX_PATH or not CERT_PFX_PASSPHRASE:
+    load_dotenv(override=False)
+    cert_path = os.environ.get("CERT_PFX_PATH")
+    cert_pass = os.environ.get("CERT_PFX_PASSPHRASE")
+    if not cert_path or not cert_pass:
         print("[cert] CERT_PFX_PATH ou CERT_PFX_PASSPHRASE ausente no .env.")
         return None
-    if not os.path.isfile(CERT_PFX_PATH):
-        print(f"[cert] Arquivo nao encontrado: {CERT_PFX_PATH}")
+    if not os.path.isfile(cert_path):
+        print(f"[cert] Arquivo nao encontrado: {cert_path}")
         return None
-    print(f"[cert] Configurando cert .pfx: {CERT_PFX_PATH}")
+    print(f"[cert] Configurando cert .pfx: {cert_path}")
     return [
-        {"origin": origin, "pfxPath": CERT_PFX_PATH, "passphrase": CERT_PFX_PASSPHRASE}
+        {"origin": origin, "pfxPath": cert_path, "passphrase": cert_pass}
         for origin in CERT_ORIGINS
     ]
 
