@@ -1,3 +1,3 @@
-from .login import main as fazer_login, AcessoBloqueado
+from .login import main as fazer_login, AcessoBloqueado, DispositivosMaximo
 
-__all__ = ["fazer_login", "AcessoBloqueado"]
+__all__ = ["fazer_login", "AcessoBloqueado", "DispositivosMaximo"]

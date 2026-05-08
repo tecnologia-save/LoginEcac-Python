@@ -33,6 +33,15 @@ MENSAGEM_ACESSO_BLOQUEADO = (
 class AcessoBloqueado(Exception):
     pass
 
+
+class DispositivosMaximo(Exception):
+    pass
+
+
+MENSAGEM_DISPOSITIVOS_MAXIMOS = (
+    "Você atingiu o número máximo de dispositivos conectados simultaneamente com esta conta."
+)
+
 CERT_ORIGINS = [
     "https://certificado.sso.acesso.gov.br",
     "https://sso.acesso.gov.br",
@@ -267,6 +276,19 @@ def main(cnpj: str, project_dir: Path | str = None):
             page.wait_for_timeout(2_000)
             print(f"  -> URL apos cert: {page.url}")
 
+            if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
+                registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
+                print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+                raise DispositivosMaximo()
+
             if _ja_logado():
                 print("  -> login realizado sem captcha.")
                 break
@@ -274,6 +296,19 @@ def main(cnpj: str, project_dir: Path | str = None):
             print("  -> verificando captcha pos-certificado...")
             if not _try_solve_captcha(page, f"captcha-pos-cert-t{tentativa_cert}"):
                 print(f"[captcha] tentativa {tentativa_cert}: falhou ao resolver captcha.")
+
+            if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
+                registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
+                print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+                raise DispositivosMaximo()
 
             if _ja_logado():
                 print("  -> login realizado apos captcha.")
