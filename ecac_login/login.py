@@ -23,6 +23,15 @@ from .log_manager import registrar_erro
 
 ECAC_URL = "http://cav.receita.fazenda.gov.br/ecac/Default.aspx"
 
+MENSAGEM_ACESSO_BLOQUEADO = (
+    "Prezado usuário, o seu acesso foi bloqueado por possuir atributos "
+    "que o caracteriza como um acesso automatizado."
+)
+
+
+class AcessoBloqueado(Exception):
+    pass
+
 CERT_PFX_PATH = os.environ.get("CERT_PFX_PATH")
 CERT_PFX_PASSPHRASE = os.environ.get("CERT_PFX_PASSPHRASE")
 
@@ -123,6 +132,21 @@ def main(cnpj: str, project_dir: Path | str = None):
         print(f"  -> erro no goto: {type(e).__name__}: {e}")
         input("ENTER pra encerrar...")
         return None
+
+    page.wait_for_timeout(1_500)
+    print("Verificando bloqueio de acesso automatizado...")
+    if MENSAGEM_ACESSO_BLOQUEADO in page.content():
+        registrar_erro("Login: acesso bloqueado — pagina exibiu mensagem de acesso automatizado.")
+        print("  -> [BLOQUEADO] Acesso bloqueado. Fechando navegador e sinalizando reinicio...")
+        try:
+            context.close()
+        except Exception:
+            pass
+        try:
+            p.stop()
+        except Exception:
+            pass
+        raise AcessoBloqueado()
 
     sessao_ativa = False
     if _ja_logado():
