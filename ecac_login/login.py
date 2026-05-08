@@ -150,14 +150,19 @@ def main(cnpj: str, project_dir: Path | str = None):
     _downloads_dir = Path.home() / "Downloads"
 
     def _salvar_download(download):
+        import shutil
         import time as _time
         nome = download.suggested_filename or f"download_{int(_time.time())}"
         destino = _downloads_dir / nome
         try:
-            download.save_as(str(destino))
-            print(f"[download] Salvo em: {destino}")
+            temp = download.path()  # bloqueia ate o download completar
+            if temp and Path(temp).exists():
+                shutil.copy2(temp, str(destino))
+                print(f"[download] Salvo em: {destino}")
+            else:
+                print(f"[download] Caminho temporario invalido para '{nome}': {temp}")
         except Exception as e:
-            print(f"[download] Erro ao salvar '{nome}': {e}")
+            print(f"[download] Erro ao salvar '{nome}': {type(e).__name__}: {e}")
 
     context.on("download", _salvar_download)
 
