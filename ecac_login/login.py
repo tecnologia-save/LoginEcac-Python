@@ -184,9 +184,12 @@ def main(cnpj: str, project_dir: Path | str = None):
         print("  -> clicado.")
 
         if not _try_solve_captcha(page, "captcha-pos-govbr"):
-            registrar_erro("Login: hCaptcha nao resolvido apos 3 tentativas (etapa gov.br).")
-            print("[captcha] 3 tentativas falharam. Abortando.")
-            return None
+            if _ja_logado():
+                print("  -> captcha falhou mas pagina ja esta logada. Continuando.")
+            else:
+                registrar_erro("Login: hCaptcha nao resolvido apos 3 tentativas (etapa gov.br).")
+                print("[captcha] 3 tentativas falharam. Abortando.")
+                return None
 
     cert_selectors = [
         "#login-certificate",
@@ -214,7 +217,14 @@ def main(cnpj: str, project_dir: Path | str = None):
         for tentativa_cert in range(1, MAX_TENTATIVAS_CERT + 1):
             print(f"[cert] Tentativa {tentativa_cert}/{MAX_TENTATIVAS_CERT}...")
 
+            if _ja_logado():
+                print("  -> ja logado no inicio da tentativa. Saindo do loop de cert.")
+                break
+
             if not _clicar_certificado():
+                if _ja_logado():
+                    print("  -> botao nao encontrado mas pagina ja esta logada. Continuando.")
+                    break
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
                 print("[cert] Botao nao encontrado. Abortando.")
                 return None
@@ -244,6 +254,9 @@ def main(cnpj: str, project_dir: Path | str = None):
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_timeout(2_000)
             else:
+                if _ja_logado():
+                    print("  -> ultima tentativa mas pagina ja esta logada. Continuando.")
+                    break
                 registrar_erro("Login: nao concluido apos todas as tentativas com certificado digital.")
                 print("[cert] Login nao concluido apos todas as tentativas. Abortando.")
                 return None
