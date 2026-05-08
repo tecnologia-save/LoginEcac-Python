@@ -37,6 +37,7 @@ CLASSIFICATION_SCHEMA = {
     "required": ["task_summary", "matching_tiles", "confidence"],
 }
 
+# Prompt para captchas com apenas texto no enunciado (sem imagem de referencia)
 PROMPT = (
     "Esta imagem e um desafio hCaptcha completo.\n\n"
     "ESTRUTURA:\n"
@@ -62,6 +63,30 @@ PROMPT = (
     "  confidence: 'high' | 'medium' | 'low'"
 )
 
+# Prompt para captchas com imagem de referencia extraida separadamente
+PROMPT_COM_REF = (
+    "Voce recebeu 2 imagens:\n"
+    "  IMAGEM 1 — screenshot completo do desafio hCaptcha (cabecalho + grade 3x3).\n"
+    "  IMAGEM 2 — a IMAGEM DE REFERENCIA extraida do cabecalho (enviada ampliada para clareza).\n\n"
+    "TAREFA:\n"
+    "1. Identifique a CATEGORIA do objeto mostrado na IMAGEM 2 (ex.: aviao, cachorro, bicicleta).\n"
+    "2. Na grade 3x3 da IMAGEM 1, selecione TODOS os tiles que contem objetos dessa mesma categoria.\n\n"
+    "A grade esta numerada assim:\n"
+    "  ┌───┬───┬───┐\n"
+    "  │ 0 │ 1 │ 2 │  (linha superior)\n"
+    "  ├───┼───┼───┤\n"
+    "  │ 3 │ 4 │ 5 │  (linha do meio)\n"
+    "  ├───┼───┼───┤\n"
+    "  │ 6 │ 7 │ 8 │  (linha inferior)\n"
+    "  └───┴───┴───┘\n\n"
+    "Seja INCLUSIVO: qualquer angulo, cor, estilo, recorte parcial — inclua o tile "
+    "se o objeto for da mesma categoria que a IMAGEM 2. Em caso de duvida razoavel, INCLUA.\n\n"
+    "Retorne:\n"
+    "  task_summary: categoria identificada na IMAGEM 2\n"
+    "  matching_tiles: lista de indices (0-8) dos tiles que atendem\n"
+    "  confidence: 'high' | 'medium' | 'low'"
+)
+
 _gemini_client: genai.Client | None = None
 
 
@@ -76,13 +101,63 @@ def _get_client() -> genai.Client:
     return _gemini_client
 
 
-def _classify_with_gemini(png: bytes) -> dict:
-    response = _get_client().models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
+def _get_reference_image_bytes(page: Page) -> bytes | None:
+    """Extrai separadamente a imagem de referencia do prompt do captcha, quando presente.
+
+    A imagem de referencia fica no cabecalho do iframe, fora dos tiles da grade (.task).
+    Enviá-la como Part separado ao Gemini melhora significativamente a precisao.
+    """
+    try:
+        iframe_el = page.locator(CHALLENGE_IFRAME_SELECTOR).first
+        frame = iframe_el.content_frame()
+        if frame is None:
+            return None
+
+        # Encontra o indice da primeira imagem que NAO e tile da grade
+        idx = frame.evaluate("""() => {
+            const taskSrcs = new Set(
+                [...document.querySelectorAll('.task img, .task-image img')]
+                .map(i => i.src)
+            );
+            const allImgs = [...document.querySelectorAll('img')];
+            for (let i = 0; i < allImgs.length; i++) {
+                const img = allImgs[i];
+                if (!taskSrcs.has(img.src) && img.complete && img.naturalWidth > 40) {
+                    return i;
+                }
+            }
+            return -1;
+        }""")
+
+        if idx < 0:
+            return None
+
+        ref_loc = frame.locator("img").nth(idx)
+        if ref_loc.is_visible(timeout=1000):
+            png = ref_loc.screenshot()
+            print("[captcha] Imagem de referencia extraida separadamente.")
+            return png
+    except Exception:
+        pass
+    return None
+
+
+def _classify_with_gemini(png: bytes, ref_img: bytes | None = None) -> dict:
+    if ref_img:
+        contents = [
+            types.Part.from_bytes(data=png, mime_type="image/png"),
+            types.Part.from_bytes(data=ref_img, mime_type="image/png"),
+            PROMPT_COM_REF,
+        ]
+    else:
+        contents = [
             types.Part.from_bytes(data=png, mime_type="image/png"),
             PROMPT,
-        ],
+        ]
+
+    response = _get_client().models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=CLASSIFICATION_SCHEMA,
@@ -156,6 +231,9 @@ def solve_hcaptcha(page: Page, max_rounds: int = 6) -> bool:
         print(f"[captcha] rodada {round_idx + 1}: aguardando imagens...")
         _wait_for_tiles(page)
 
+        # Tenta extrair imagem de referencia separada (caso "mesma categoria")
+        ref_img = _get_reference_image_bytes(page)
+
         result = None
         last_err = None
         iframe_loc = page.locator(CHALLENGE_IFRAME_SELECTOR).first
@@ -170,7 +248,7 @@ def solve_hcaptcha(page: Page, max_rounds: int = 6) -> bool:
                 continue
 
             try:
-                result = _classify_with_gemini(png)
+                result = _classify_with_gemini(png, ref_img)
             except Exception as e:
                 last_err = e
                 tipo = type(e).__name__
