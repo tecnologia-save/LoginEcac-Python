@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+chrome_debug_profile/
+logs/
+*.png
+*.jpg
+*.pfx
+*.p12

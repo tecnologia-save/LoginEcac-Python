@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ecac-login"
+version = "0.1.0"
+description = "Login automatizado no portal eCAC via Patchright com suporte a certificado digital"
+requires-python = ">=3.10"
+dependencies = [
+    "patchright",
+    "python-dotenv",
+    "google-generativeai",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ecac_login*"]
