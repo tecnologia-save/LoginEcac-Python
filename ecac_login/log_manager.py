@@ -8,7 +8,7 @@ def registrar_erro(mensagem: str, log_dir: Path = None) -> None:
         log_dir = Path.cwd() / "logs"
     log_dir.mkdir(exist_ok=True)
     agora = datetime.now()
-    nome_arquivo = agora.strftime("%d-%m-%Y") + "_automation.txt"
+    nome_arquivo = agora.strftime("%d-%m-%Y") + "_protocolacao_previdenciario.txt"
     entrada = f"[{agora.strftime('%d/%m/%Y %H:%M:%S')}] ERRO: {mensagem}\n"
     print(f"[LOG] {entrada.strip()}")
     with open(log_dir / nome_arquivo, "a", encoding="utf-8") as f:
