@@ -18,7 +18,7 @@ load_dotenv()
 
 from patchright.sync_api import sync_playwright
 
-from .captcha_solver import solve_hcaptcha
+from resolvedor_captcha import solve_hcaptcha
 from .log_manager import registrar_erro
 
 ECAC_URL = "http://cav.receita.fazenda.gov.br/ecac/Default.aspx"
@@ -72,7 +72,7 @@ def _try_solve_captcha(page, etapa: str, max_attempts: int = 3) -> bool:
     print(f"[{etapa}] Verificando hCaptcha (ate {max_attempts} tentativas)...")
     for tentativa in range(1, max_attempts + 1):
         try:
-            resultado = solve_hcaptcha(page)
+            resultado = solve_hcaptcha(page, log_fn=registrar_erro)
             if resultado:
                 print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: OK (resolvido ou ausente).")
                 return True
