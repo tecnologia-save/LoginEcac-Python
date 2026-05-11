@@ -104,11 +104,11 @@ def _build_client_certificates(project_dir: Path):
     ]
 
 
-def _try_solve_captcha(page, etapa: str, max_attempts: int = 3) -> bool:
+def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None) -> bool:
     print(f"[{etapa}] Verificando hCaptcha (ate {max_attempts} tentativas)...")
     for tentativa in range(1, max_attempts + 1):
         try:
-            resultado = solve_hcaptcha(page, log_fn=registrar_erro)
+            resultado = solve_hcaptcha(page, log_fn=registrar_erro, metrics_fn=metrics_fn)
             if resultado:
                 print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: OK (resolvido ou ausente).")
                 return True
@@ -119,7 +119,7 @@ def _try_solve_captcha(page, etapa: str, max_attempts: int = 3) -> bool:
     return False
 
 
-def main(cnpj: str, project_dir: Path | str = None):
+def main(cnpj: str, project_dir: Path | str = None, metrics=None):
     """Realiza o login no eCAC e retorna (playwright, context, page) autenticados.
 
     Args:
@@ -161,6 +161,10 @@ def main(cnpj: str, project_dir: Path | str = None):
 
     page = context.pages[0] if context.pages else context.new_page()
     print("Pagina obtida.")
+
+    def _captcha_fn(chamadas: int, resolvido: bool, rodadas: int) -> None:
+        if metrics:
+            metrics.registrar_captcha(chamadas, resolvido, rodadas)
 
     def _ja_logado():
         return "cav.receita.fazenda.gov.br/ecac" in page.url and "autenticacao" not in page.url
@@ -222,7 +226,7 @@ def main(cnpj: str, project_dir: Path | str = None):
 
         print("  -> clicado.")
 
-        if not _try_solve_captcha(page, "captcha-pos-govbr"):
+        if not _try_solve_captcha(page, "captcha-pos-govbr", metrics_fn=_captcha_fn):
             if _ja_logado():
                 print("  -> captcha falhou mas pagina ja esta logada. Continuando.")
             else:
@@ -294,7 +298,7 @@ def main(cnpj: str, project_dir: Path | str = None):
                 break
 
             print("  -> verificando captcha pos-certificado...")
-            if not _try_solve_captcha(page, f"captcha-pos-cert-t{tentativa_cert}"):
+            if not _try_solve_captcha(page, f"captcha-pos-cert-t{tentativa_cert}", metrics_fn=_captcha_fn):
                 print(f"[captcha] tentativa {tentativa_cert}: falhou ao resolver captcha.")
 
             if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
