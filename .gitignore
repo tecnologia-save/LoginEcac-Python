@@ -11,3 +11,4 @@ logs/
 *.jpg
 *.pfx
 *.p12
+senhas.json

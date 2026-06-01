@@ -16,3 +16,6 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ecac_login*"]
+
+[tool.setuptools.package-data]
+ecac_login = ["Certificados/*"]

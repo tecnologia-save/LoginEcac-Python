@@ -5,8 +5,8 @@ Uso:
     p, context, page = fazer_login(cnpj="12345678000195")
 
 Pre-requisitos no .env do projeto chamador:
-    CERT_PFX_PATH=C:\\Certificados\\meu_certificado.pfx
-    CERT_PFX_PASSPHRASE=senha-do-pfx
+    CERT_PFX_PATH=meu_certificado.pfx   (nome do arquivo em LoginEcac/Certificados/)
+    CERT_PFX_PASSPHRASE=senha-do-pfx    (opcional: lida automaticamente do senhas.json)
     GEMINI_API_KEY=chave-gemini
 """
 import json
@@ -23,6 +23,7 @@ from resolvedor_captcha import solve_hcaptcha
 from .log_manager import registrar_erro
 
 ECAC_URL = "http://cav.receita.fazenda.gov.br/ecac/Default.aspx"
+CERT_DIR = Path(__file__).parent / "Certificados"
 
 MENSAGEM_ACESSO_BLOQUEADO = (
     "Prezado usuário, o seu acesso foi bloqueado por possuir atributos "
@@ -58,6 +59,10 @@ CERT_ORIGINS = [
     "https://www.nfe.fazenda.gov.br",
     "https://receita.fazenda.gov.br",
     "https://www.receita.fazenda.gov.br",
+    # Domínio novo do portal de serviços da Receita Federal
+    "https://servicos.receitafederal.gov.br",
+    "https://receitafederal.gov.br",
+    "https://www.receitafederal.gov.br",
 ]
 
 
@@ -89,17 +94,34 @@ def _configurar_download(user_data_dir: str) -> None:
 
 def _build_client_certificates(project_dir: Path):
     load_dotenv(dotenv_path=project_dir / ".env", override=True)
-    cert_path = os.environ.get("CERT_PFX_PATH")
-    cert_pass = os.environ.get("CERT_PFX_PASSPHRASE")
-    if not cert_path or not cert_pass:
-        print("[cert] CERT_PFX_PATH ou CERT_PFX_PASSPHRASE ausente no .env.")
+    cert_path_raw = os.environ.get("CERT_PFX_PATH", "")
+    cert_pass = os.environ.get("CERT_PFX_PASSPHRASE", "")
+
+    if not cert_path_raw:
+        print("[cert] CERT_PFX_PATH ausente no .env.")
         return None
-    if not os.path.isfile(cert_path):
+
+    cert_path = Path(cert_path_raw)
+    if not cert_path.is_absolute():
+        cert_path = CERT_DIR / cert_path
+
+    if not cert_pass:
+        senhas_file = CERT_DIR / "senhas.json"
+        if senhas_file.exists():
+            senhas = json.loads(senhas_file.read_text(encoding="utf-8"))
+            cert_pass = senhas.get(cert_path.name, "")
+
+    if not cert_pass:
+        print("[cert] CERT_PFX_PASSPHRASE ausente no .env e nao encontrada em senhas.json.")
+        return None
+
+    if not cert_path.is_file():
         print(f"[cert] Arquivo nao encontrado: {cert_path}")
         return None
+
     print(f"[cert] Configurando cert .pfx: {cert_path}")
     return [
-        {"origin": origin, "pfxPath": cert_path, "passphrase": cert_pass}
+        {"origin": origin, "pfxPath": str(cert_path), "passphrase": cert_pass}
         for origin in CERT_ORIGINS
     ]
 
