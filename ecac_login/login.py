@@ -19,7 +19,7 @@ load_dotenv()
 
 from patchright.sync_api import sync_playwright
 
-from resolvedor_captcha import solve_hcaptcha
+from captcha_uipath import solve_hcaptcha
 from .log_manager import registrar_erro
 
 ECAC_URL = "http://cav.receita.fazenda.gov.br/ecac/Default.aspx"
@@ -130,7 +130,7 @@ def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None)
     print(f"[{etapa}] Verificando hCaptcha (ate {max_attempts} tentativas)...")
     for tentativa in range(1, max_attempts + 1):
         try:
-            resultado = solve_hcaptcha(page, log_fn=registrar_erro, metrics_fn=metrics_fn)
+            resultado = solve_hcaptcha(page)
             if resultado:
                 print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: OK (resolvido ou ausente).")
                 return True
@@ -139,6 +139,52 @@ def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None)
             print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: {type(e).__name__}: {e}")
         page.wait_for_timeout(2_000)
     return False
+
+
+def abrir_browser_com_certificado(project_dir: Path | str = None):
+    """Abre o Chrome com o certificado digital configurado e retorna (p, context, page).
+
+    Não faz login no eCAC — apenas abre o navegador com os client_certificates
+    carregados para autenticação direta no portal de serviços RF.
+
+    Args:
+        project_dir: Diretório do projeto chamador. Usado para o perfil Chrome e .env.
+
+    Returns:
+        Tupla (p, context, page) — navegador aberto, sem navegação inicial.
+    """
+    if project_dir is None:
+        project_dir = Path.cwd()
+    project_dir = Path(project_dir)
+
+    load_dotenv(dotenv_path=project_dir / ".env", override=True)
+
+    user_data_dir = str(project_dir / "chrome_debug_profile")
+    os.makedirs(user_data_dir, exist_ok=True)
+
+    _configurar_download(user_data_dir)
+    client_certs = _build_client_certificates(project_dir)
+
+    launch_kwargs = dict(
+        user_data_dir=user_data_dir,
+        channel="chrome",
+        headless=False,
+        no_viewport=True,
+        ignore_https_errors=True,
+        accept_downloads=True,
+        args=["--start-maximized", "--remote-debugging-port=9222"],
+    )
+    if client_certs:
+        launch_kwargs["client_certificates"] = client_certs
+
+    p = sync_playwright().start()
+    print("Lancando Chrome (certificado carregado)...")
+    context = p.chromium.launch_persistent_context(**launch_kwargs)
+    print("Chrome lancado.")
+
+    page = context.pages[0] if context.pages else context.new_page()
+    print("Pagina obtida.")
+    return p, context, page
 
 
 def main(cnpj: str, project_dir: Path | str = None, metrics=None):
@@ -388,6 +434,15 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None):
         return None
 
     page.wait_for_timeout(3_000)
+
+    try:
+        if page.locator('#dialog-bloqueio-ativo-caixapostal').first.is_visible(timeout=2_000):
+            print("  -> popup 'mensagens importantes' detectado. Clicando em 'Ir para a Caixa Postal'...")
+            page.get_by_role("button", name="Ir para a Caixa Postal").first.click(timeout=5_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            return p, context, page
+    except Exception:
+        pass
 
     print("Clicando em 'Alterar perfil de acesso'...")
     page.locator("#btnPerfil").first.click()
