@@ -43,6 +43,15 @@ MENSAGEM_DISPOSITIVOS_MAXIMOS = (
     "Você atingiu o número máximo de dispositivos conectados simultaneamente com esta conta."
 )
 
+# Flag passada ao Chrome para selecionar automaticamente o certificado do Windows Cert Store
+# sem exibir diálogo de seleção ao usuário.
+_AUTO_SELECT_CERT_FLAG = (
+    '--auto-select-certificate-for-urls='
+    '[{"pattern":"https://[*.]acesso.gov.br","filter":{}},'
+    '{"pattern":"https://[*.]receita.fazenda.gov.br","filter":{}},'
+    '{"pattern":"https://[*.]fazenda.gov.br","filter":{}}]'
+)
+
 CERT_ORIGINS = [
     "https://certificado.sso.acesso.gov.br",
     "https://sso.acesso.gov.br",
@@ -93,49 +102,12 @@ def _configurar_download(user_data_dir: str) -> None:
 
 
 def _build_client_certificates(project_dir: Path):
-    load_dotenv(dotenv_path=project_dir / ".env", override=True)
-    cert_path_raw = os.environ.get("CERT_PFX_PATH", "")
-    cert_pass = os.environ.get("CERT_PFX_PASSPHRASE", "")
-
-    if not cert_path_raw:
-        print("[cert] CERT_PFX_PATH ausente no .env.")
-        return None
-
-    cert_path = Path(cert_path_raw)
-    if not cert_path.is_absolute():
-        cert_path = CERT_DIR / cert_path
-
-    if not cert_path.is_file():
-        print(f"[cert] Arquivo nao encontrado: {cert_path}")
-        return None
-
-    # Prefere PEM (certPath + keyPath): mais compatível com Playwright/BoringSSL
-    # para certificados ICP-Brasil do que pfxPath, evitando SSL alert 40.
-    cert_pem = cert_path.parent / (cert_path.stem + ".pem")
-    key_pem  = cert_path.parent / (cert_path.stem + "_key.pem")
-    if cert_pem.is_file() and key_pem.is_file():
-        print(f"[cert] Usando PEM: {cert_pem.name} + {key_pem.name}")
-        return [
-            {"origin": origin, "certPath": str(cert_pem), "keyPath": str(key_pem)}
-            for origin in CERT_ORIGINS
-        ]
-
-    # Fallback: PFX direto
-    if not cert_pass:
-        senhas_file = CERT_DIR / "senhas.json"
-        if senhas_file.exists():
-            senhas = json.loads(senhas_file.read_text(encoding="utf-8"))
-            cert_pass = senhas.get(cert_path.name, "")
-
-    if not cert_pass:
-        print("[cert] CERT_PFX_PASSPHRASE ausente e PEM nao disponivel.")
-        return None
-
-    print(f"[cert] Usando PFX (fallback): {cert_path.name}")
-    return [
-        {"origin": origin, "pfxPath": str(cert_path), "passphrase": cert_pass}
-        for origin in CERT_ORIGINS
-    ]
+    # Certificado gerenciado via Windows Certificate Store + --auto-select-certificate-for-urls.
+    # Playwright's client_certificates (pfxPath / certPath+keyPath) causa SSL alert 40
+    # com certificados ICP-Brasil porque usa um proxy OpenSSL interno que nao suporta
+    # adequadamente a cadeia ICP-Brasil. O certutil importa o PFX no Windows Cert Store
+    # antes de lancar o Chrome (run.py) e o Chrome usa CAPI nativamente sem intermediario.
+    return None
 
 
 def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None) -> bool:
@@ -184,7 +156,7 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
         no_viewport=True,
         ignore_https_errors=True,
         accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222"],
+        args=["--start-maximized", "--remote-debugging-port=9222", _AUTO_SELECT_CERT_FLAG],
     )
     if client_certs:
         launch_kwargs["client_certificates"] = client_certs
@@ -229,7 +201,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None):
         no_viewport=True,
         ignore_https_errors=True,
         accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222"],
+        args=["--start-maximized", "--remote-debugging-port=9222", _AUTO_SELECT_CERT_FLAG],
     )
     if client_certs:
         launch_kwargs["client_certificates"] = client_certs
