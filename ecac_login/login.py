@@ -105,6 +105,22 @@ def _build_client_certificates(project_dir: Path):
     if not cert_path.is_absolute():
         cert_path = CERT_DIR / cert_path
 
+    if not cert_path.is_file():
+        print(f"[cert] Arquivo nao encontrado: {cert_path}")
+        return None
+
+    # Prefere PEM (certPath + keyPath): mais compatível com Playwright/BoringSSL
+    # para certificados ICP-Brasil do que pfxPath, evitando SSL alert 40.
+    cert_pem = cert_path.parent / (cert_path.stem + ".pem")
+    key_pem  = cert_path.parent / (cert_path.stem + "_key.pem")
+    if cert_pem.is_file() and key_pem.is_file():
+        print(f"[cert] Usando PEM: {cert_pem.name} + {key_pem.name}")
+        return [
+            {"origin": origin, "certPath": str(cert_pem), "keyPath": str(key_pem)}
+            for origin in CERT_ORIGINS
+        ]
+
+    # Fallback: PFX direto
     if not cert_pass:
         senhas_file = CERT_DIR / "senhas.json"
         if senhas_file.exists():
@@ -112,14 +128,10 @@ def _build_client_certificates(project_dir: Path):
             cert_pass = senhas.get(cert_path.name, "")
 
     if not cert_pass:
-        print("[cert] CERT_PFX_PASSPHRASE ausente no .env e nao encontrada em senhas.json.")
+        print("[cert] CERT_PFX_PASSPHRASE ausente e PEM nao disponivel.")
         return None
 
-    if not cert_path.is_file():
-        print(f"[cert] Arquivo nao encontrado: {cert_path}")
-        return None
-
-    print(f"[cert] Configurando cert .pfx: {cert_path}")
+    print(f"[cert] Usando PFX (fallback): {cert_path.name}")
     return [
         {"origin": origin, "pfxPath": str(cert_path), "passphrase": cert_pass}
         for origin in CERT_ORIGINS
