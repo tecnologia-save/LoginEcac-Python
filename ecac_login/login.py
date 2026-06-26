@@ -11,6 +11,7 @@ Pre-requisitos no .env do projeto chamador:
 """
 import json
 import os
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +22,12 @@ from patchright.sync_api import sync_playwright
 
 from captcha_uipath import solve_hcaptcha
 from .log_manager import registrar_erro
+
+try:
+    from .cert_dialog import selecionar_certificado_no_dialogo as _selecionar_cert_dialog
+    _CERT_DIALOG_OK = True
+except Exception:
+    _CERT_DIALOG_OK = False
 
 ECAC_URL = "http://cav.receita.fazenda.gov.br/ecac/Default.aspx"
 CERT_DIR = Path(__file__).parent / "Certificados"
@@ -43,14 +50,26 @@ MENSAGEM_DISPOSITIVOS_MAXIMOS = (
     "Você atingiu o número máximo de dispositivos conectados simultaneamente com esta conta."
 )
 
-# Flag passada ao Chrome para selecionar automaticamente o certificado do Windows Cert Store
-# sem exibir diálogo de seleção ao usuário.
-_AUTO_SELECT_CERT_FLAG = (
-    '--auto-select-certificate-for-urls='
-    '[{"pattern":"https://[*.]acesso.gov.br","filter":{}},'
-    '{"pattern":"https://[*.]receita.fazenda.gov.br","filter":{}},'
-    '{"pattern":"https://[*.]fazenda.gov.br","filter":{}}]'
-)
+def _build_auto_select_cert_flag() -> str:
+    """Constrói --auto-select-certificate-for-urls filtrando pelo CN do cert selecionado.
+
+    Lê CERT_SUBJECT_CN do ambiente (gravado por run.py antes de chamar fazer_login).
+    Com CN definido, o Chrome escolhe exatamente o cert correto do Windows Cert Store
+    quando há múltiplos instalados. Sem CN, usa filtro vazio (primeiro disponível).
+    """
+    subject_cn = os.getenv("CERT_SUBJECT_CN", "").strip()
+    filt = {"SUBJECT": {"CN": subject_cn}} if subject_cn else {}
+    patterns = [
+        "https://[*.]acesso.gov.br",
+        "https://[*.]receita.fazenda.gov.br",
+        "https://[*.]fazenda.gov.br",
+    ]
+    entries = json.dumps(
+        [{"pattern": p, "filter": filt} for p in patterns],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return f"--auto-select-certificate-for-urls={entries}"
 
 CERT_ORIGINS = [
     "https://certificado.sso.acesso.gov.br",
@@ -156,7 +175,7 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
         no_viewport=True,
         ignore_https_errors=True,
         accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222", _AUTO_SELECT_CERT_FLAG],
+        args=["--start-maximized", "--remote-debugging-port=9222", _build_auto_select_cert_flag()],
     )
     if client_certs:
         launch_kwargs["client_certificates"] = client_certs
@@ -171,7 +190,7 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
     return p, context, page
 
 
-def main(cnpj: str, project_dir: Path | str = None, metrics=None):
+def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: bool = True, cert_serial: str = ""):
     """Realiza o login no eCAC e retorna (playwright, context, page) autenticados.
 
     Args:
@@ -201,7 +220,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None):
         no_viewport=True,
         ignore_https_errors=True,
         accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222", _AUTO_SELECT_CERT_FLAG],
+        args=["--start-maximized", "--remote-debugging-port=9222", _build_auto_select_cert_flag()],
     )
     if client_certs:
         launch_kwargs["client_certificates"] = client_certs
@@ -323,6 +342,19 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None):
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
                 print("[cert] Botao nao encontrado. Abortando.")
                 return None
+
+            # Fallback: se a policy do registro nao funcionou, pywinauto seleciona
+            # o certificado na janela nativa que o Chrome exibir.
+            if not policy_ok and _CERT_DIALOG_OK:
+                _cn = os.getenv("CERT_SUBJECT_CN", "").strip()
+                threading.Thread(
+                    target=_selecionar_cert_dialog,
+                    args=(_cn, cert_serial),
+                    kwargs={"timeout": 90.0},
+                    daemon=True,
+                ).start()
+            elif tentativa_cert == 1:
+                print("[cert] Policy de auto-selecao ativa — Chrome escolhe o certificado sozinho.")
 
             print("  -> clicado. Aguardando recarregar...")
             try:
