@@ -257,6 +257,6 @@ LoginEcac-Python/
 | `patchright` | Automação do Chrome com suporte nativo a certificados digitais client-side |
 | `python-dotenv` | Carregamento das variáveis do `.env` |
 | `google-genai` | API Google Gemini Vision para resolução do hCaptcha |
-| `resolvedor-captcha` | Módulo de resolução de hCaptcha (pacote interno Save) |
+| `ResolvedorCaptcha` | Módulo de resolução de hCaptcha (pacote interno Save) |
 
 > O arquivo `.pfx`, o `.env` e o `senhas.json` **nunca devem ser versionados** — todos estão no `.gitignore`.
