@@ -12,3 +12,8 @@ logs/
 *.pfx
 *.p12
 senhas.json
+
+# Claude Code — configuracao PESSOAL da maquina.
+# A .claude/settings.json (permissoes do projeto) e versionada de proposito:
+# assim a lista fica revisavel em PR, em vez de crescer em silencio local.
+.claude/settings.local.json
