@@ -2,7 +2,7 @@
 
 Uso:
     from ecac_login import fazer_login
-    p, context, page = fazer_login(cnpj="12345678000195")
+    p, context, page = fazer_login(cnpj="<CNPJ da empresa>")
 
 Pre-requisitos no .env do projeto chamador:
     CERT_PFX_PATH=meu_certificado.pfx   (nome do arquivo em LoginEcac/Certificados/)
@@ -126,7 +126,7 @@ def _configurar_download(user_data_dir: str) -> None:
     prefs["plugins"]["always_open_pdf_externally"] = True
 
     prefs_file.write_text(json.dumps(prefs), encoding="utf-8")
-    print(f"[download] Diretorio configurado: {downloads_dir}")
+    print("[download] Diretorio de download configurado.")
 
 
 def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase):
@@ -324,12 +324,12 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     def _ja_logado():
         return "cav.receita.fazenda.gov.br/ecac" in page.url and "autenticacao" not in page.url
 
-    print(f"Abrindo {ECAC_URL} ...")
+    print("Abrindo o eCAC ...")
     try:
         page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
-        print(f"  -> URL: {page.url}")
+        print("  -> pagina inicial carregada.")
     except Exception as e:
-        print(f"  -> erro no goto: {type(e).__name__}: {e}")
+        print(f"  -> erro no goto: {type(e).__name__}")
         input("ENTER pra encerrar...")
         return None
 
@@ -365,7 +365,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                 print("  -> link encontrado. Clicando...")
                 voltar_link.click()
                 page.wait_for_load_state("domcontentloaded", timeout=20_000)
-                print(f"  -> URL apos voltar: {page.url}")
+                print("  -> retornou para a pagina de login.")
         except Exception:
             pass
 
@@ -446,7 +446,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             except Exception:
                 pass
             page.wait_for_timeout(2_000)
-            print(f"  -> URL apos cert: {page.url}")
+            print("  -> certificado apresentado; navegacao seguiu.")
 
             if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
                 registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
@@ -499,7 +499,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                 return None
 
         print("Captcha pos-certificado tratado.")
-        print(f"  -> URL apos captcha: {page.url}")
+        print("  -> captcha tratado; navegacao seguiu.")
 
         print("Aguardando redirecionamento final para cav.receita.fazenda.gov.br/ecac (ate 90s)...")
         try:
@@ -507,14 +507,14 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                 lambda u: "cav.receita.fazenda.gov.br/ecac" in u and "autenticacao" not in u,
                 timeout=90_000,
             )
-            print(f"  -> URL: {page.url}")
+            print("  -> redirecionamento final concluido.")
         except Exception as e:
-            registrar_erro(f"Login: redirecionamento para eCAC nao ocorreu. URL atual: {page.url}")
-            print(f"  -> nao chegou no eCAC: {type(e).__name__}: {e}")
+            registrar_erro("Login: redirecionamento final para o eCAC nao ocorreu.")
+            print(f"  -> nao chegou no eCAC: {type(e).__name__}")
             try:
                 shot = str(project_dir / "_debug_pos_cert.png")
                 page.screenshot(path=shot, full_page=True)
-                print(f"     screenshot: {shot}")
+                print("     screenshot de debug gravado.")
             except Exception:
                 pass
             return None
@@ -523,12 +523,12 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     try:
         page.locator("#btnPerfil").first.wait_for(state="visible", timeout=60_000)
     except Exception as e:
-        registrar_erro(f"Login: dashboard do eCAC nao carregou (#btnPerfil ausente). URL: {page.url}")
-        print(f"  -> erro aguardando dashboard: {type(e).__name__}: {e}")
+        registrar_erro("Login: dashboard do eCAC nao carregou (#btnPerfil ausente).")
+        print(f"  -> erro aguardando dashboard: {type(e).__name__}")
         try:
             shot = str(project_dir / "_debug_dashboard.png")
             page.screenshot(path=shot, full_page=True)
-            print(f"     screenshot: {shot}")
+            print("     screenshot de debug gravado.")
         except Exception:
             pass
         return None
@@ -583,7 +583,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     except Exception:
         print("  -> input nao ficou visivel; vai tentar fallback via JS.")
 
-    print(f"Preenchendo CNPJ '{cnpj}' em #txtNIPapel2...")
+    print("Preenchendo identificador do perfil PJ em #txtNIPapel2...")
     try:
         nip_input.fill(cnpj)
     except Exception:
@@ -700,14 +700,15 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             print(f"  -> [acesso automatizado] detectado. Aguardando 10s e tentando novamente...")
             page.wait_for_timeout(10_000)
             if tentativa_alterar == MAX_TENTATIVAS_ALTERAR:
-                registrar_erro(f"[CNPJ: {cnpj}] Acesso automatizado detectado: limite de {MAX_TENTATIVAS_ALTERAR} tentativas atingido.")
+                registrar_erro("Acesso automatizado detectado ao alterar o perfil: "
+                               f"limite de {MAX_TENTATIVAS_ALTERAR} tentativas atingido.")
                 print("  -> Limite de tentativas atingido para erro de acesso automatizado. Abortando.")
                 _fechar_popup_e_sair()
                 return None
             continue
 
         if erro:
-            registrar_erro(f"[CNPJ: {cnpj}] {erro}")
+            registrar_erro(erro)
             _fechar_popup_e_sair()
             return None
 
@@ -723,6 +724,6 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         page.wait_for_load_state("domcontentloaded", timeout=15_000)
     except Exception:
         pass
-    print(f"  -> URL apos alteracao: {page.url}")
+    print("  -> perfil de acesso alterado.")
     print("Concluido.")
     return p, context, page
