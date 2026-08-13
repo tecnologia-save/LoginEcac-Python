@@ -13,6 +13,15 @@ dependencies = [
     "ResolvedorCaptcha @ git+https://github.com/tecnologia-save/ResolvedorCaptcha-Python.git@9188f180c7c44ca5e3c42bad6cfdd2ceddb3a0c1",
 ]
 
+[dependency-groups]
+# Ferramentas de desenvolvimento — NAO sao dependencias de runtime da lib.
+# Instalacao: pip install --group dev   (requer pip >= 25.1)
+dev = ["pytest>=8,<10"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ecac_login*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

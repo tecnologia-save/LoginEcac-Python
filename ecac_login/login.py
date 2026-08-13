@@ -50,14 +50,23 @@ MENSAGEM_DISPOSITIVOS_MAXIMOS = (
     "Você atingiu o número máximo de dispositivos conectados simultaneamente com esta conta."
 )
 
-def _build_auto_select_cert_flag() -> str:
+class CertificadoInvalido(ValueError):
+    """Configuração de certificado malformada — falha local, antes de abrir o navegador."""
+
+
+def _build_auto_select_cert_flag(cert_subject_cn: str | None = None) -> str:
     """Constrói --auto-select-certificate-for-urls filtrando pelo CN do cert selecionado.
 
-    Lê CERT_SUBJECT_CN do ambiente (gravado por run.py antes de chamar fazer_login).
-    Com CN definido, o Chrome escolhe exatamente o cert correto do Windows Cert Store
-    quando há múltiplos instalados. Sem CN, usa filtro vazio (primeiro disponível).
+    Usada SOMENTE no modo Windows Certificate Store. Com CN definido, o Chrome
+    escolhe exatamente o cert correto do store quando há múltiplos instalados.
+    Sem CN, usa filtro vazio (primeiro disponível).
+
+    `cert_subject_cn` explícito tem prioridade; quando ausente, mantém-se o
+    comportamento atual de ler CERT_SUBJECT_CN do ambiente.
     """
-    subject_cn = os.getenv("CERT_SUBJECT_CN", "").strip()
+    if cert_subject_cn is None:
+        cert_subject_cn = os.getenv("CERT_SUBJECT_CN", "")
+    subject_cn = cert_subject_cn.strip()
     filt = {"SUBJECT": {"CN": subject_cn}} if subject_cn else {}
     patterns = [
         "https://[*.]acesso.gov.br",
@@ -120,13 +129,78 @@ def _configurar_download(user_data_dir: str) -> None:
     print(f"[download] Diretorio configurado: {downloads_dir}")
 
 
-def _build_client_certificates(project_dir: Path):
-    # Certificado gerenciado via Windows Certificate Store + --auto-select-certificate-for-urls.
-    # Playwright's client_certificates (pfxPath / certPath+keyPath) causa SSL alert 40
-    # com certificados ICP-Brasil porque usa um proxy OpenSSL interno que nao suporta
-    # adequadamente a cadeia ICP-Brasil. O certutil importa o PFX no Windows Cert Store
-    # antes de lancar o Chrome (run.py) e o Chrome usa CAPI nativamente sem intermediario.
-    return None
+def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase):
+    """Monta `client_certificates` a partir do PFX recebido por argumento.
+
+    Uma entrada por origem: `client_certificates` casa por ORIGEM EXATA, sem
+    wildcard. A passphrase é repassada como veio — a API aceita `str | None`, e
+    exigir senha não vazia inventaria uma regra que o contrato não tem.
+
+    Nota histórica: esta função devolvia `None` incondicionalmente, com a
+    justificativa de que `client_certificates` falharia com a cadeia ICP-Brasil
+    (SSL alert 40). Essa hipótese foi REFUTADA POR MEDIÇÃO: o probe DEV
+    `AUT-0008` completou o handshake mTLS e chegou à home autenticada do eCAC
+    por este exato caminho, com Patchright 1.60.1.
+    """
+    return [
+        {"origin": origin,
+         "pfxPath": str(cert_pfx_path),
+         "passphrase": cert_pfx_passphrase}
+        for origin in CERT_ORIGINS
+    ]
+
+
+def _montar_launch_kwargs(user_data_dir: str, *,
+                          cert_pfx_path=None,
+                          cert_pfx_passphrase=None,
+                          cert_subject_cn: str | None = None) -> dict:
+    """Monta os kwargs de lançamento do Chrome. Função PURA.
+
+    Não abre navegador, não toca filesystem e não lê segredo — existe para que a
+    configuração de certificado seja testável sem Chrome.
+
+    Dois modos, mutuamente exclusivos. Quem escolhe é a PRESENÇA de
+    `cert_pfx_path`, nunca a senha: deixar a passphrase decidir faria um pedido
+    explícito de PFX virar modo Store em silêncio.
+
+    MODO PFX (`cert_pfx_path` informado)
+        `client_certificates` montado a partir do argumento e a flag
+        `--auto-select-certificate-for-urls` AUSENTE. `cert_subject_cn`,
+        `CERT_SUBJECT_CN` do ambiente e `cert_serial` residual não reativam o
+        Windows Certificate Store.
+        É a mesma semântica de entrega e seleção de certificado validada no
+        Probe 1: PFX via `client_certificates` e ausência de auto-select do
+        Windows Store.
+
+    MODO STORE (`cert_pfx_path` ausente)
+        Comportamento atual do desktop, preservado: sem `client_certificates` e
+        com a flag de auto-seleção.
+    """
+    args = ["--start-maximized", "--remote-debugging-port=9222"]
+    kwargs = dict(
+        user_data_dir=user_data_dir,
+        channel="chrome",
+        headless=False,
+        no_viewport=True,
+        ignore_https_errors=True,
+        accept_downloads=True,
+        args=args,
+    )
+
+    if cert_pfx_path is None:
+        args.append(_build_auto_select_cert_flag(cert_subject_cn))
+        return kwargs
+
+    if not str(cert_pfx_path).strip():
+        # Pedido explícito de PFX com caminho vazio é erro de configuração.
+        # Cair para o Store aqui seria trocar o mecanismo em silêncio.
+        raise CertificadoInvalido(
+            "cert_pfx_path foi informado vazio; forneca um caminho valido "
+            "ou omita o parametro para usar o Windows Certificate Store.")
+
+    kwargs["client_certificates"] = _build_client_certificates(
+        cert_pfx_path, cert_pfx_passphrase)
+    return kwargs
 
 
 def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None) -> bool:
@@ -166,19 +240,8 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
     os.makedirs(user_data_dir, exist_ok=True)
 
     _configurar_download(user_data_dir)
-    client_certs = _build_client_certificates(project_dir)
-
-    launch_kwargs = dict(
-        user_data_dir=user_data_dir,
-        channel="chrome",
-        headless=False,
-        no_viewport=True,
-        ignore_https_errors=True,
-        accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222", _build_auto_select_cert_flag()],
-    )
-    if client_certs:
-        launch_kwargs["client_certificates"] = client_certs
+    # Sem parâmetros de certificado: modo Windows Certificate Store, como antes.
+    launch_kwargs = _montar_launch_kwargs(user_data_dir)
 
     p = sync_playwright().start()
     print("Lancando Chrome (certificado carregado)...")
@@ -190,13 +253,38 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
     return p, context, page
 
 
-def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: bool = True, cert_serial: str = ""):
+def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: bool = True,
+         cert_serial: str = "", *,
+         cert_pfx_path: str | None = None,
+         cert_pfx_passphrase: str | None = None,
+         cert_subject_cn: str | None = None):
     """Realiza o login no eCAC e retorna (playwright, context, page) autenticados.
+
+    Duas formas de apresentar o certificado, mutuamente exclusivas — ver
+    `_montar_launch_kwargs` para a regra de precedencia:
+
+    A) PFX explicito (`cert_pfx_path`) — o arquivo e entregue ao Chrome via
+       `client_certificates` e a auto-selecao do Windows Certificate Store fica
+       DESLIGADA. E o caminho para agente desassistido: nao usa store, certutil,
+       UAC nem policy de registro.
+
+    B) Windows Certificate Store (padrao, sem `cert_pfx_path`) — comportamento
+       atual do desktop, inalterado.
 
     Args:
         cnpj: CNPJ da empresa (14 digitos, sem formatacao).
         project_dir: Diretorio do projeto chamador. Usado para salvar o perfil do Chrome
                      e screenshots de debug. Padrao: diretorio de trabalho atual.
+        metrics: Coletor opcional de metricas de captcha.
+        policy_ok: True se a policy de auto-selecao do registro esta ativa. False
+                   ativa o fallback pywinauto — relevante somente no modo B.
+        cert_serial: Serial do cert escolhido, usado pelo fallback pywinauto.
+                     Sem efeito no modo A.
+        cert_pfx_path: Caminho do .pfx (modo A). A PRESENCA deste argumento e o
+                       que seleciona o modo PFX.
+        cert_pfx_passphrase: Senha do .pfx (modo A). Repassada como veio.
+        cert_subject_cn: CN do certificado no store (modo B). Quando ausente,
+                         mantem-se a leitura de CERT_SUBJECT_CN do ambiente.
 
     Returns:
         Tupla (p, context, page) em caso de sucesso, ou None em caso de falha.
@@ -211,19 +299,15 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     os.makedirs(user_data_dir, exist_ok=True)
 
     _configurar_download(user_data_dir)
-    client_certs = _build_client_certificates(project_dir)
-
-    launch_kwargs = dict(
-        user_data_dir=user_data_dir,
-        channel="chrome",
-        headless=False,
-        no_viewport=True,
-        ignore_https_errors=True,
-        accept_downloads=True,
-        args=["--start-maximized", "--remote-debugging-port=9222", _build_auto_select_cert_flag()],
+    launch_kwargs = _montar_launch_kwargs(
+        user_data_dir,
+        cert_pfx_path=cert_pfx_path,
+        cert_pfx_passphrase=cert_pfx_passphrase,
+        cert_subject_cn=cert_subject_cn,
     )
-    if client_certs:
-        launch_kwargs["client_certificates"] = client_certs
+    # Só o MODO, nunca o valor: caminho do .pfx, senha, CN e serial não vão para o log.
+    print("[cert] Modo PFX explicito." if cert_pfx_path is not None
+          else "[cert] Modo Windows Certificate Store.")
 
     p = sync_playwright().start()
     print("Lancando Chrome...")
