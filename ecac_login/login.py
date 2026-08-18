@@ -54,6 +54,42 @@ class CertificadoInvalido(ValueError):
     """Configuração de certificado malformada — falha local, antes de abrir o navegador."""
 
 
+# ── Diagnostico do popup de perfil: metadado, nunca conteudo ──────────────────
+#
+# O bloco `[diag] inputs do formPJ` imprimia cada input do formulario com o
+# `value` junto — e um deles e o CNPJ que acabara de ser preenchido. Como o
+# runtime do AutoHub captura o stdout, o documento virava dado persistido na
+# plataforma.
+#
+# A defesa fica AQUI, em Python, e nao so no JS: o JS ja devolve a forma
+# reduzida, mas quem garante e este filtro de chaves — ele e puro, e por isso
+# testavel com sentinela.
+
+CAMPOS_DIAG_INPUT = ("idx", "type", "name", "id", "visible",
+                     "preenchido", "parece_alterar", "aciona_captcha")
+
+# Vocabulario FECHADO do resultado do clique via DOM. O valor vem do navegador;
+# o que sai no log e sempre um destes, ou "desconhecido".
+RESULTADOS_CLIQUE = ("no-form", "no-button", "clicked:visible", "clicked:hidden")
+
+
+def _diag_inputs(brutos) -> list:
+    """So metadado de vocabulario fechado. Nenhum conteudo de campo passa.
+
+    `preenchido` responde a unica pergunta que o diagnostico precisava do
+    conteudo — se o campo tem algo dentro — sem carregar o que ha dentro.
+    """
+    if not isinstance(brutos, list):
+        return []
+    return [{chave: item.get(chave) for chave in CAMPOS_DIAG_INPUT if chave in item}
+            for item in brutos if isinstance(item, dict)]
+
+
+def _resultado_de_clique(valor) -> str:
+    """Devolve o valor so se ele for um dos nossos."""
+    return valor if valor in RESULTADOS_CLIQUE else "desconhecido"
+
+
 def _build_auto_select_cert_flag(cert_subject_cn: str | None = None) -> str:
     """Constrói --auto-select-certificate-for-urls filtrando pelo CN do cert selecionado.
 
@@ -213,7 +249,7 @@ def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None)
                 return True
             print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: solver retornou False.")
         except Exception as e:
-            print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: {type(e).__name__}: {e}")
+            print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: {type(e).__name__}")
         page.wait_for_timeout(2_000)
     return False
 
@@ -375,7 +411,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             gov_btn.wait_for(state="visible", timeout=15_000)
             gov_btn.click()
         except Exception as e:
-            print(f"  -> botao nao encontrado: {type(e).__name__}: {e}")
+            print(f"  -> botao nao encontrado: {type(e).__name__}")
             input("ENTER pra encerrar...")
             return None
 
@@ -610,16 +646,22 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             """() => {
                 const f = document.getElementById('formPJ');
                 if (!f) return null;
-                return Array.from(f.querySelectorAll('input')).map((i, idx) => ({
-                    idx, type: i.type, value: i.value, name: i.name, id: i.id,
-                    visible: i.offsetParent !== null,
-                    onclick: i.getAttribute('onclick'),
-                }));
+                return Array.from(f.querySelectorAll('input')).map((i, idx) => {
+                    const onclick = i.getAttribute('onclick') || '';
+                    return {
+                        idx, type: i.type, name: i.name, id: i.id,
+                        visible: i.offsetParent !== null,
+                        preenchido: !!(i.value && i.value.length),
+                        parece_alterar: (i.type === 'submit' || i.type === 'button')
+                                        && i.value === 'Alterar',
+                        aciona_captcha: onclick.includes('validaCaptcha'),
+                    };
+                });
             }"""
         )
-        print(f"[diag] inputs do formPJ: {inputs_info}")
+        print(f"[diag] inputs do formPJ: {_diag_inputs(inputs_info)}")
     except Exception as e:
-        print(f"[diag] erro: {e}")
+        print(f"[diag] inputs do formPJ: falhou ({type(e).__name__})")
 
     ERROS_FATAIS = [
         "CNPJ deve ser informado com todos os 14 dígitos.",
@@ -683,9 +725,9 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                     return 'clicked:' + (visible.offsetParent !== null ? 'visible' : 'hidden');
                 }"""
             )
-            print(f"  -> DOM click resultado: {result}")
+            print(f"  -> DOM click resultado: {_resultado_de_clique(result)}")
         except Exception as e3:
-            print(f"  -> falhou tudo: {type(e3).__name__}: {e3}")
+            print(f"  -> falhou tudo: {type(e3).__name__}")
 
     MAX_TENTATIVAS_ALTERAR = 5
     for tentativa_alterar in range(1, MAX_TENTATIVAS_ALTERAR + 1):
