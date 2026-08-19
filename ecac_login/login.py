@@ -353,6 +353,57 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     page = context.pages[0] if context.pages else context.new_page()
     print("Pagina obtida.")
 
+    # Quem LANCA fecha. Ponto unico: antes, cada caminho de falha decidia por si
+    # se fechava, e alguns nao fechavam — o Chrome ficava vivo segurando o
+    # diretorio de perfil, e quem tentasse remover o temporario depois batia em
+    # PermissionError no Windows.
+    try:
+        ok = garantir_acesso_ecac(page, cnpj, metrics=metrics,
+                                  policy_ok=policy_ok, cert_serial=cert_serial)
+    except BaseException:
+        encerrar_sessao(p, context)
+        raise
+    if not ok:
+        encerrar_sessao(p, context)
+        return None
+    return p, context, page
+
+
+def encerrar_sessao(p=None, context=None) -> None:
+    """Fecha contexto e para o Playwright. IDEMPOTENTE e sem levantar.
+
+    Chamar duas vezes nao pode virar erro: o teardown da execucao e o caminho
+    de falha de quem lancou podem alcancar a mesma sessao.
+    """
+    try:
+        if context is not None:
+            context.close()
+    except Exception:  # noqa: BLE001, S110 — fechar duas vezes nao e erro
+        pass
+    try:
+        if p is not None:
+            p.stop()
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
+                         policy_ok: bool = True, cert_serial: str = "") -> bool:
+    """Garante eCAC autenticado com o perfil PJ do CNPJ, numa sessao EXISTENTE.
+
+    Nao lanca navegador, nao cria contexto e NAO FECHA NADA: a sessao pertence a
+    quem a criou. Existe porque uma execucao que passa pelo Servicos RF e depois
+    pelo eCAC ja tem um Chrome autenticado — lancar outro descarta o certificado
+    ja apresentado e a autenticacao ja obtida.
+
+    Reutilizar NAO e assumir: o fluxo verifica autenticacao e perfil, e so
+    autentica ou troca de perfil quando e preciso.
+
+    True quando o eCAC esta autenticado e o perfil ativo e o CNPJ pedido.
+    False quando nao foi possivel garantir isso. `AcessoBloqueado` continua
+    subindo para quem decide reiniciar.
+    """
+
     def _captcha_fn(chamadas: int, resolvido: bool, rodadas: int) -> None:
         if metrics:
             metrics.registrar_captcha(chamadas, resolvido, rodadas)
@@ -366,22 +417,13 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         print("  -> pagina inicial carregada.")
     except Exception as e:
         print(f"  -> erro no goto: {type(e).__name__}")
-        input("ENTER pra encerrar...")
-        return None
+        return False
 
     page.wait_for_timeout(1_500)
     print("Verificando bloqueio de acesso automatizado...")
     if MENSAGEM_ACESSO_BLOQUEADO in page.content():
         registrar_erro("Login: acesso bloqueado — pagina exibiu mensagem de acesso automatizado.")
-        print("  -> [BLOQUEADO] Acesso bloqueado. Fechando navegador e sinalizando reinicio...")
-        try:
-            context.close()
-        except Exception:
-            pass
-        try:
-            p.stop()
-        except Exception:
-            pass
+        print("  -> [BLOQUEADO] Acesso bloqueado. Sinalizando reinicio...")
         raise AcessoBloqueado()
 
     sessao_ativa = False
@@ -412,8 +454,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             gov_btn.click()
         except Exception as e:
             print(f"  -> botao nao encontrado: {type(e).__name__}")
-            input("ENTER pra encerrar...")
-            return None
+            return False
 
         print("  -> clicado.")
 
@@ -423,7 +464,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             else:
                 registrar_erro("Login: hCaptcha nao resolvido apos 3 tentativas (etapa gov.br).")
                 print("[captcha] 3 tentativas falharam. Abortando.")
-                return None
+                return False
 
     cert_selectors = [
         "#login-certificate",
@@ -461,7 +502,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                     break
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
                 print("[cert] Botao nao encontrado. Abortando.")
-                return None
+                return False
 
             # Fallback: se a policy do registro nao funcionou, pywinauto seleciona
             # o certificado na janela nativa que o Chrome exibir.
@@ -487,14 +528,6 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
                 registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
                 print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                try:
-                    p.stop()
-                except Exception:
-                    pass
                 raise DispositivosMaximo()
 
             if _ja_logado():
@@ -508,14 +541,6 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
                 registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
                 print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                try:
-                    p.stop()
-                except Exception:
-                    pass
                 raise DispositivosMaximo()
 
             if _ja_logado():
@@ -532,7 +557,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                     break
                 registrar_erro("Login: nao concluido apos todas as tentativas com certificado digital.")
                 print("[cert] Login nao concluido apos todas as tentativas. Abortando.")
-                return None
+                return False
 
         print("Captcha pos-certificado tratado.")
         print("  -> captcha tratado; navegacao seguiu.")
@@ -553,7 +578,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                 print("     screenshot de debug gravado.")
             except Exception:
                 pass
-            return None
+            return False
 
     print("Aguardando dashboard do eCAC carregar (#btnPerfil, ate 60s)...")
     try:
@@ -567,7 +592,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             print("     screenshot de debug gravado.")
         except Exception:
             pass
-        return None
+        return False
 
     page.wait_for_timeout(3_000)
 
@@ -576,7 +601,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             print("  -> popup 'mensagens importantes' detectado. Clicando em 'Ir para a Caixa Postal'...")
             page.get_by_role("button", name="Ir para a Caixa Postal").first.click(timeout=5_000)
             page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            return p, context, page
+            return True
     except Exception:
         pass
 
@@ -588,7 +613,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         page.locator("#formPJ").first.wait_for(state="attached", timeout=15_000)
     except Exception:
         print("  -> #formPJ nao aparece. Abortando.")
-        return None
+        return False
 
     print("Ativando aba 'Pessoa Juridica'...")
     pj_tab_selectors = [
@@ -681,7 +706,7 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                     return msg
             except Exception:
                 continue
-        return None
+        return False
 
     def _fechar_popup_e_sair():
         print("  -> Fechando popup de perfil...")
@@ -746,13 +771,13 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                                f"limite de {MAX_TENTATIVAS_ALTERAR} tentativas atingido.")
                 print("  -> Limite de tentativas atingido para erro de acesso automatizado. Abortando.")
                 _fechar_popup_e_sair()
-                return None
+                return False
             continue
 
         if erro:
             registrar_erro(erro)
             _fechar_popup_e_sair()
-            return None
+            return False
 
         print("Aguardando popup fechar (ate 20s)...")
         try:
@@ -768,4 +793,4 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         pass
     print("  -> perfil de acesso alterado.")
     print("Concluido.")
-    return p, context, page
+    return True

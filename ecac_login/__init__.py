@@ -1,3 +1,14 @@
-from .login import main as fazer_login, AcessoBloqueado, DispositivosMaximo, abrir_browser_com_certificado
+from .login import (
+    AcessoBloqueado,
+    DispositivosMaximo,
+    abrir_browser_com_certificado,
+    encerrar_sessao,
+    garantir_acesso_ecac,
+)
+from .login import main as fazer_login
 
-__all__ = ["fazer_login", "AcessoBloqueado", "DispositivosMaximo", "abrir_browser_com_certificado"]
+# `fazer_login` CRIA a sessao (standalone). `garantir_acesso_ecac` opera numa
+# sessao existente e nao fecha nada — e o que permite a uma execucao que ja
+# passou pelo Servicos RF chegar ao eCAC sem lancar outro Chrome.
+__all__ = ["AcessoBloqueado", "DispositivosMaximo", "abrir_browser_com_certificado",
+           "encerrar_sessao", "fazer_login", "garantir_acesso_ecac"]
