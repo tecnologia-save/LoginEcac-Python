@@ -260,3 +260,46 @@ LoginEcac-Python/
 | `ResolvedorCaptcha` | Módulo de resolução de hCaptcha (pacote interno Save) |
 
 > O arquivo `.pfx`, o `.env` e o `senhas.json` **nunca devem ser versionados** — todos estão no `.gitignore`.
+
+## Requisitos de Windows
+
+O `cert_dialog` usa `pywinauto` para clicar no diálogo nativo "Selecione um
+certificado". Duas configurações do Windows precisam estar de pé, e nenhuma
+delas é padrão. As duas falham com a **mesma** mensagem, que não cita
+`pywin32`, não nomeia a DLL que falta e não sugere causa:
+
+```
+ImportError: DLL load failed while importing win32ui:
+The specified module could not be found.
+```
+
+**Caminhos longos ligados.** O wheel do `pywin32` tem um caminho interno fundo.
+Sem isso o `pip` aborta a extração no meio: sobra `pythonwin/` e faltam
+`win32/` e `pywin32_system32/`.
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+  -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+```
+
+Reinicie depois — e **apague o venv**: a instalação truncada não deixa
+`RECORD`, então o pip acha que já instalou e não refaz.
+
+**Visual C++ Redistributable x64.** O `win32ui` é o único módulo do `pywin32`
+que linka contra o runtime MFC (`mfc140u.dll`), que vem no redistributable e
+não no pacote. Máquina recém-criada não tem.
+
+```powershell
+$o = "$env:TEMP\vc_redist.x64.exe"
+Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $o
+Start-Process $o -ArgumentList '/install','/quiet','/norestart' -Wait
+```
+
+Conferência das duas:
+
+```powershell
+python -c "import win32ui; print('win32ui OK')"
+```
+
+Sem isso o efeito visível é o navegador **parado no diálogo de certificado**,
+que parece problema de certificado e não é.

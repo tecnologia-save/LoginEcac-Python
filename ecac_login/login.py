@@ -85,6 +85,46 @@ def _diag_inputs(brutos) -> list:
             for item in brutos if isinstance(item, dict)]
 
 
+def _conteudo(page, tentativas: int = 3, espera_ms: int = 250) -> str:
+    """HTML da página, ou string vazia se ela estiver navegando.
+
+    `page.content()` levanta quando a navegação está em curso:
+
+        Page.content: Unable to retrieve content because the page is navigating
+
+    Os três usos desta função são **guardas**: procuram a mensagem de acesso
+    bloqueado ou a de número máximo de dispositivos. Deixar a exceção subir faz
+    a guarda derrubar o login inteiro por não ter conseguido ler o HTML — mais
+    frágil do que aquilo que ela protege. E o sintoma não sugere a causa: quem
+    lê o erro procura defeito na página, não uma leitura feita cedo demais.
+
+    Os três pontos são justamente os de maior movimento — depois do `goto`,
+    depois de apresentar o certificado e depois de submeter o captcha, que por
+    definição navega. Algumas centenas de milissegundos depois a mesma leitura
+    funciona.
+
+    Devolve `""` quando não conseguiu ler. Não ter lido não é o mesmo que a
+    mensagem não estar lá, então a guarda passa — e um falso negativo aqui
+    apenas adia a detecção, enquanto a exceção encerrava a run na hora.
+    """
+    for tentativa in range(tentativas):
+        try:
+            return page.content()
+        except Exception as e:  # noqa: BLE001
+            if tentativa == tentativas - 1:
+                # Só o tipo da exceção, nunca o texto dela: a política deste
+                # repositório é não interpolar objeto de exceção em saída, e a
+                # suíte cobra isso. Aqui o tipo já distingue navegação em curso
+                # de página fechada, que é a única dúvida real.
+                print(f"  -> nao foi possivel ler a pagina ({type(e).__name__})")
+                return ""
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5_000)
+            except Exception:  # noqa: BLE001
+                page.wait_for_timeout(espera_ms)
+    return ""
+
+
 def _resultado_de_clique(valor) -> str:
     """Devolve o valor so se ele for um dos nossos."""
     return valor if valor in RESULTADOS_CLIQUE else "desconhecido"
@@ -421,7 +461,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
 
     page.wait_for_timeout(1_500)
     print("Verificando bloqueio de acesso automatizado...")
-    if MENSAGEM_ACESSO_BLOQUEADO in page.content():
+    if MENSAGEM_ACESSO_BLOQUEADO in _conteudo(page):
         registrar_erro("Login: acesso bloqueado — pagina exibiu mensagem de acesso automatizado.")
         print("  -> [BLOQUEADO] Acesso bloqueado. Sinalizando reinicio...")
         raise AcessoBloqueado()
@@ -525,7 +565,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             page.wait_for_timeout(2_000)
             print("  -> certificado apresentado; navegacao seguiu.")
 
-            if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
+            if MENSAGEM_DISPOSITIVOS_MAXIMOS in _conteudo(page):
                 registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
                 print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
                 raise DispositivosMaximo()
@@ -538,7 +578,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             if not _try_solve_captcha(page, f"captcha-pos-cert-t{tentativa_cert}", metrics_fn=_captcha_fn):
                 print(f"[captcha] tentativa {tentativa_cert}: falhou ao resolver captcha.")
 
-            if MENSAGEM_DISPOSITIVOS_MAXIMOS in page.content():
+            if MENSAGEM_DISPOSITIVOS_MAXIMOS in _conteudo(page):
                 registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
                 print("  -> [DISPOSITIVOS] Numero maximo de dispositivos atingido. Fechando navegador...")
                 raise DispositivosMaximo()
