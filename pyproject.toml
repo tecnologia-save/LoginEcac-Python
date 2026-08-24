@@ -11,6 +11,15 @@ dependencies = [
     "patchright",
     "python-dotenv",
     "ResolvedorCaptcha @ git+https://github.com/tecnologia-save/ResolvedorCaptcha-Python.git@d029888bb4de4d33390ab1ee3b3c7c51caf01353",
+    # cert_dialog.py importa pywinauto para escolher o certificado no diálogo
+    # nativo do Windows. O import é tardio, então `import ecac_login` passa e a
+    # falta só aparece no meio do login — navegador aberto, captcha já
+    # resolvido. O ponto mais caro possível para descobrir que falta um pacote.
+    #
+    # Atenção: instalar não basta em toda máquina. Veja "Requisitos de Windows"
+    # no README — o pywin32 precisa de caminhos longos ligados para sequer
+    # extrair, e o win32ui precisa do runtime MFC, que nenhum pip instala.
+    "pywinauto",
 ]
 
 [dependency-groups]
