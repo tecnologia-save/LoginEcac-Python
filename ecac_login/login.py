@@ -438,6 +438,26 @@ def encerrar_sessao(p=None, context=None) -> None:
 # balaio. A planilha do usuario recebia o mesmo texto vago em todas as linhas.
 _ULTIMA_RECUSA = {"mensagem": ""}
 
+# Ate onde a ultima chamada CHEGOU. Vira True so quando o CNPJ ja esta no campo
+# e o "Alterar" vai ser acionado.
+#
+# Existe porque tudo o que vem ANTES disso — abrir o Chrome, alcancar o eCAC,
+# passar pelo gov.br, resolver o captcha, apresentar o certificado — nao tem
+# nada a ver com o CNPJ que se quer representar. Um `goto` que estourou por
+# timeout e problema de rede ou de navegador, e visto em producao ele foi
+# registrado na planilha do usuario como falha DAQUELA empresa, que assim
+# passaria a ser pulada na proxima execucao sem nunca ter sido tentada.
+_CHEGOU_NA_TROCA = {"sim": False}
+
+
+def tentou_trocar_perfil() -> bool:
+    """True se a ultima chamada chegou a acionar o "Alterar" com o CNPJ.
+
+    False significa que a empresa NAO foi tentada: o que falhou foi o caminho
+    ate o eCAC, e isso vale para qualquer CNPJ igualmente.
+    """
+    return _CHEGOU_NA_TROCA["sim"]
+
 
 def ultima_recusa_de_perfil() -> str:
     """A mensagem da ultima recusa de troca de perfil, ou "" se nao houve.
@@ -465,6 +485,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     """
 
     _ULTIMA_RECUSA["mensagem"] = ""
+    _CHEGOU_NA_TROCA["sim"] = False
 
     def _captcha_fn(chamadas: int, resolvido: bool, rodadas: int) -> None:
         if metrics:
@@ -910,6 +931,8 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     # segundo caso a repeticao e justamente a causa.
     MAX_ENVIOS_ALTERAR = 2
     for tentativa_alterar in range(1, MAX_ENVIOS_ALTERAR + 1):
+        # Daqui em diante a falha e DESTA empresa: o CNPJ ja esta no campo.
+        _CHEGOU_NA_TROCA["sim"] = True
         print(f"Clicando no botao 'Alterar' (formPJ) — envio {tentativa_alterar} "
               f"de no maximo {MAX_ENVIOS_ALTERAR}...")
         _clicar_alterar()

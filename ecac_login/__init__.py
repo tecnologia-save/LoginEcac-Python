@@ -4,6 +4,7 @@ from .login import (
     abrir_browser_com_certificado,
     encerrar_sessao,
     garantir_acesso_ecac,
+    tentou_trocar_perfil,
     ultima_recusa_de_perfil,
 )
 from .login import main as fazer_login
@@ -13,4 +14,5 @@ from .login import main as fazer_login
 # passou pelo Servicos RF chegar ao eCAC sem lancar outro Chrome.
 __all__ = ["AcessoBloqueado", "DispositivosMaximo", "abrir_browser_com_certificado",
            "encerrar_sessao", "fazer_login", "garantir_acesso_ecac",
-           "ultima_recusa_de_perfil"]
+           "ultima_recusa_de_perfil",
+           "tentou_trocar_perfil"]
