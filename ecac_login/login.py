@@ -11,6 +11,7 @@ Pre-requisitos no .env do projeto chamador:
 """
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -335,15 +336,24 @@ def _pagina_pronta(page, timeout_ms: int = 10_000) -> bool:
             return False
 
 
-def _ha_hcaptcha(page) -> bool:
-    """True se ha um hCaptcha montado — como frame proprio ou no DOM."""
-    try:
-        for frame in page.frames:
-            if "hcaptcha.com" in (getattr(frame, "url", "") or ""):
-                return True
-    except Exception:
-        pass
-    for sel in (".h-captcha", "[data-hcaptcha-widget-id]", "iframe[src*='hcaptcha']"):
+def _desafio_hcaptcha_visivel(page) -> bool:
+    """True quando o DESAFIO do hCaptcha esta na tela — nao o widget invisivel.
+
+    A distincao ja custou caro. A pagina de login do e-CAC NASCE com um iframe
+    do hCaptcha embutido: o widget invisivel do `#hcaptcha-govbr`, com
+    `frame=checkbox-invisible` na URL. Ele esta la desde o primeiro byte, antes
+    de qualquer clique.
+
+    Contar esse iframe como "o captcha apareceu" faz qualquer prova de reacao
+    dar positivo ANTES do clique — e foi exatamente isso que aconteceu: o
+    "Entrar com gov.br" deixou de ser clicado, porque a prova ja dizia que a
+    pagina havia reagido.
+
+    O que so existe DEPOIS de `hcaptcha.execute()` e o desafio VISIVEL: ate la
+    ele fica num container com visibility:hidden e top:-10000px.
+    """
+    for sel in ("iframe[src*='hcaptcha'][src*='frame=challenge']",
+                "iframe[title*='hCaptcha' i]"):
         try:
             if page.locator(sel).first.is_visible(timeout=200):
                 return True
@@ -352,8 +362,111 @@ def _ha_hcaptcha(page) -> bool:
     return False
 
 
-def _esperar_reacao(prova, espera_ms: int = ESPERA_PROVA_MS) -> bool:
-    """Poll em `prova` ate a janela fechar. Excecao dela conta como 'ainda nao'."""
+# ── Sonda do mundo da pagina ──────────────────────────────────────────────────
+#
+# O patchright avalia num mundo ISOLADO: enxerga o DOM, mas nao as variaveis que
+# a pagina definiu. `page.evaluate("typeof hcaptcha")` responde "undefined" com
+# o script perfeitamente carregado — medido.
+#
+# `add_script_tag` insere um <script> de verdade no documento, e esse roda no
+# mundo da PAGINA. Ele nao devolve valor para ca, entao escreve a resposta num
+# atributo: o DOM e o terreno que os dois mundos compartilham.
+ATRIBUTO_SONDA = "data-ecac-sonda"
+ESPERA_HANDLER_MS = 15_000
+_NOME_SEGURO = re.compile(r"^[A-Za-z_$][\w$]*$")
+
+
+def _tipos_na_pagina(page, nomes: tuple) -> dict:
+    """`typeof <nome>` para cada nome, medido DENTRO da pagina.
+
+    Devolve {} quando a sonda nao pode ser feita (CSP bloqueando script inline,
+    navegacao em curso, guia fechada). Vazio e "nao sei", nunca "nao existe".
+    """
+    nomes = tuple(n for n in nomes if _NOME_SEGURO.match(n or ""))
+    if not nomes:
+        return {}
+    partes = ",".join(f"'{n}:'+(typeof {n})" for n in nomes)
+    tag = None
+    try:
+        tag = page.add_script_tag(content=(
+            f"document.documentElement.setAttribute("
+            f"'{ATRIBUTO_SONDA}', [{partes}].join('|'));"))
+        bruto = page.evaluate(
+            f"() => document.documentElement.getAttribute('{ATRIBUTO_SONDA}')")
+    except Exception:
+        bruto = None
+    for limpar in (lambda: tag.evaluate("el => el.remove()") if tag else None,
+                   lambda: page.evaluate(
+                       f"() => document.documentElement.removeAttribute("
+                       f"'{ATRIBUTO_SONDA}')")):
+        try:
+            limpar()
+        except Exception:
+            pass
+    if not bruto:
+        return {}
+    achados = {}
+    for item in bruto.split("|"):
+        nome, _, tipo = item.partition(":")
+        achados[nome] = tipo
+    return achados
+
+
+def _pronto_para_govbr(page, timeout_ms: int = None) -> bool:
+    """Espera existir QUEM ATENDA o clique do 'Entrar com gov.br'.
+
+    O botao e `<input type="image" onclick="validarHcaptcha('govBr')">`, e essa
+    funcao usa `$(...)` e `hcaptcha.execute(...)`. O hcaptcha vem de um
+    `<script async defer>` do proprio hcaptcha.com.
+
+    Ou seja: existe uma janela real em que o botao ja esta desenhado, o clique e
+    despachado, e a funcao estoura no meio por falta do `hcaptcha`. Nada
+    aparece — nem erro nosso, nem mudanca na tela. E o "diz que clicou mas nao
+    clicou".
+
+    Nunca impede o clique: sem resposta da sonda ou com o prazo esgotado,
+    devolve o controle assim mesmo e deixa a prova de reacao decidir.
+    """
+    timeout_ms = ESPERA_HANDLER_MS if timeout_ms is None else timeout_ms
+    alvos = ("validarHcaptcha", "hcaptcha", "jQuery")
+    limite = time.monotonic() + timeout_ms / 1000.0
+    avisou = False
+    while True:
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        tipos = _tipos_na_pagina(page, alvos)
+        if not tipos:
+            print("  -> nao deu para sondar a pagina; seguindo para o clique.")
+            return True
+        faltando = [n for n in alvos if tipos.get(n) in (None, "undefined")]
+        if not faltando:
+            if avisou:
+                print("  -> a pagina ja tem quem atenda o clique.")
+            return True
+        if not avisou:
+            avisou = True
+            print(f"  -> a pagina ainda nao carregou {', '.join(faltando)}; "
+                  "esperando antes de clicar.")
+        if time.monotonic() >= limite:
+            print(f"  -> [AVISO] {', '.join(faltando)} nao apareceu(ram) em "
+                  f"{timeout_ms / 1000:.0f}s; clicando assim mesmo.")
+            return True
+        try:
+            page.wait_for_timeout(PASSO_PROVA_MS)
+        except Exception:
+            return False
+
+
+def _esperar_reacao(prova, espera_ms: int = None) -> bool:
+    """Poll em `prova` ate a janela fechar. Excecao dela conta como 'ainda nao'.
+
+    O prazo e lido AQUI, e nao no valor padrao da assinatura: assim continua
+    sendo o do modulo, que os testes ajustam.
+    """
+    espera_ms = ESPERA_PROVA_MS if espera_ms is None else espera_ms
     limite = time.monotonic() + espera_ms / 1000.0
     while True:
         try:
@@ -366,33 +479,151 @@ def _esperar_reacao(prova, espera_ms: int = ESPERA_PROVA_MS) -> bool:
         time.sleep(PASSO_PROVA_MS / 1000.0)
 
 
-def _clicar_ate_reagir(localizar, prova, descricao: str,
-                       tentativas: int = CLIQUES_GOVBR,
-                       espera_ms: int = ESPERA_PROVA_MS) -> bool:
+# O "Entrar com gov.br" e um <input type="image">, nao um <button>. Os
+# seletores vao do mais especifico ao mais generico: o onclick nomeia o handler
+# e e o que ha de mais estavel; o caminho absoluto fica por ultimo, porque
+# depende da ordem dos <p> dentro do bloco.
+SEL_GOVBR = (
+    '#login-dados-certificado input[onclick*="validarHcaptcha"]',
+    '#frmLoginCert input[type="image"]',
+    'input[type="image"][alt*="Gov" i]',
+    'xpath=//*[@id="login-dados-certificado"]/p[2]/input',
+)
+
+
+def _achar_govbr(page, timeout_ms: int = 1_000):
+    """(locator, seletor css) do primeiro VISIVEL, ou (None, "").
+
+    O seletor volta junto porque uma das vias de clique precisa dele em CSS
+    para injetar na pagina; caminho absoluto nao serve la, e por isso volta "".
+    """
+    for sel in SEL_GOVBR:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=timeout_ms):
+                return loc, ("" if sel.startswith("xpath=") else sel)
+        except Exception:
+            continue
+    return None, ""
+
+
+def _prova_govbr(page, url_antes: str):
+    """Devolve a funcao que responde se o clique no gov.br foi atendido.
+
+    Cada item e uma MUDANCA, nunca um estado que a pagina ja tinha ao carregar
+    — foi essa confusao que fez o clique ser pulado por inteiro. O widget
+    invisivel do hCaptcha nasce com a pagina e por isso nao conta; o desafio
+    VISIVEL conta, porque so aparece depois de `hcaptcha.execute()`.
+    """
+    def _reagiu() -> bool:
+        if page.is_closed():
+            return False
+        if page.url != url_antes:
+            return True          # o formulario foi enviado
+        if _desafio_hcaptcha_visivel(page):
+            return True          # o hCaptcha pediu a vez
+        for sel in ("#login-certificate", "text=Seu certificado digital"):
+            try:
+                if page.locator(sel).first.is_visible(timeout=200):
+                    return True
+            except Exception:
+                continue
+        # Ultimo recurso: o proprio botao saiu da tela.
+        try:
+            return _achar_govbr(page, timeout_ms=200)[0] is None
+        except Exception:
+            return True
+
+    return _reagiu
+
+
+def _clicar_por_todas_as_vias(page, localizar, seletor_css: str,
+                              descricao: str, via_inicial: int = 0) -> str:
+    """Clica pela primeira via que nao levantar. Devolve o nome da via, ou "".
+
+    As vias vao da mais fiel a mais insistente, e cada uma cobre uma falha
+    diferente da anterior:
+
+      1. clique real       — mouse de verdade; e o que o portal espera.
+      2. evento de clique  — despacha o evento NO elemento, sem mouse. Passa
+                             por cima de qualquer coisa que esteja cobrindo.
+      3. clique na pagina  — um <script> injetado chama `.click()` do lado de
+                             LA. E o unico jeito de o clique nascer no mundo da
+                             pagina; util quando o handler inline depende de
+                             `window.event`, que o mundo isolado nao alimenta.
+      4. clique forcado    — por ultimo de proposito, e nao primeiro como
+                             parecia natural. `force=True` pula as checagens do
+                             Playwright e clica NAS COORDENADAS: com um overlay
+                             por cima, o clique acerta o overlay, nao volta
+                             erro nenhum, e nada acontece. Medido. E um clique
+                             em falso com cara de sucesso — o oposto do que se
+                             quer numa via de reserva.
+
+    `via_inicial` faz a repeticao comecar por uma via diferente: se a primeira
+    ja foi despachada e nada aconteceu, repeti-la igual tende a dar no mesmo.
+    """
+    loc = localizar()
+    if loc is None:
+        return ""
+    try:
+        loc.scroll_into_view_if_needed(timeout=2_000)
+    except Exception:
+        pass
+
+    vias = [
+        ("clique real", lambda: loc.click(timeout=5_000)),
+        ("evento de clique", lambda: loc.dispatch_event("click")),
+    ]
+    if seletor_css:
+        alvo = seletor_css.replace("\\", "\\\\").replace("'", "\\'")
+        vias.append(("clique dentro da pagina", lambda: page.add_script_tag(
+            content=f"document.querySelector('{alvo}').click();")))
+    vias.append(("clique forcado", lambda: loc.click(timeout=5_000, force=True)))
+
+    for indice in range(len(vias)):
+        nome, acao = vias[(via_inicial + indice) % len(vias)]
+        try:
+            acao()
+            return nome
+        except Exception as e:
+            print(f"    -> {descricao} por {nome}: {type(e).__name__}")
+    return ""
+
+
+def _clicar_ate_reagir(page, localizar, seletor_css, prova, descricao: str,
+                       tentativas: int = None, espera_ms: int = None) -> bool:
     """Clica ate `prova()` confirmar que a pagina reagiu. False se nunca reagiu.
 
     `localizar()` devolve o locator na HORA do clique, e nao antes: entre a
     busca e o clique a tela pode ter sido remontada.
 
-    A janela e folgada de proposito. Repetir um clique que na verdade pegou
-    manda dois envios seguidos, e e assim que o gov.br passa a tratar a sessao
-    como acesso automatizado. Errar para o lado de esperar demais e barato;
-    errar para o lado de clicar de novo custa a empresa inteira.
+    A primeira tentativa CLICA, sem consultar a prova antes. Consultar antes
+    parece prudente e nao e: prova mede o estado da tela, e um estado que ja
+    existia no carregamento (um iframe embutido, um elemento que sempre esteve
+    la) passa por reacao e faz o clique ser pulado. Foi assim que este botao
+    deixou de ser clicado. Evidencia so vale como MUDANCA, e antes do primeiro
+    clique nao ha com o que comparar.
+
+    Da segunda em diante a prova e consultada, sim: ai ela protege contra o
+    erro oposto — repetir um clique que ja pegou manda dois envios seguidos, e
+    e assim que o gov.br passa a tratar a sessao como acesso automatizado.
     """
+    tentativas = CLIQUES_GOVBR if tentativas is None else tentativas
+    espera_ms = ESPERA_PROVA_MS if espera_ms is None else espera_ms
     for tentativa in range(1, tentativas + 1):
-        try:
-            if prova():
-                return True
-        except Exception:
-            pass
-        try:
-            localizar().click()
-        except Exception as e:
-            # Sumiu na hora de clicar. Pode ser a reacao chegando atrasada —
-            # quem decide e a prova, nao a excecao.
-            print(f"  -> {descricao}: o clique nao foi ({type(e).__name__}).")
+        if tentativa > 1:
+            try:
+                if prova():
+                    print(f"  -> {descricao}: a pagina reagiu (tardiamente).")
+                    return True
+            except Exception:
+                pass
+        via = _clicar_por_todas_as_vias(page, localizar, seletor_css, descricao,
+                                        via_inicial=tentativa - 1)
+        if not via:
+            print(f"  -> {descricao}: nenhuma via de clique funcionou.")
             return _esperar_reacao(prova, espera_ms)
-        print(f"  -> {descricao}: clicado; conferindo se a pagina reagiu...")
+        print(f"  -> {descricao}: clicado ({via}); conferindo se a pagina reagiu...")
         if _esperar_reacao(prova, espera_ms):
             print(f"  -> {descricao}: a pagina reagiu.")
             return True
@@ -638,45 +869,28 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             pass
 
         print("Clicando em 'Entrar com gov.br'...")
-        SEL_GOVBR = 'xpath=//*[@id="login-dados-certificado"]/p[2]/input'
-        try:
-            page.locator(SEL_GOVBR).first.wait_for(state="visible", timeout=15_000)
-        except Exception as e:
-            print(f"  -> botao nao encontrado: {type(e).__name__}")
+        limite_busca = time.monotonic() + 15.0
+        loc_govbr, sel_govbr = _achar_govbr(page)
+        while loc_govbr is None and time.monotonic() < limite_busca:
+            try:
+                page.wait_for_timeout(300)
+            except Exception:
+                break
+            loc_govbr, sel_govbr = _achar_govbr(page)
+        if loc_govbr is None:
+            print("  -> botao 'Entrar com gov.br' nao encontrado.")
+            registrar_erro("Login: botao 'Entrar com gov.br' nao encontrado.")
             return False
 
-        # Esperar a pagina terminar de carregar antes de clicar evita o clique
-        # em falso mais comum: o botao ja desenhado, o script dele ainda nao.
+        # Duas esperas, e elas respondem a coisas diferentes: o documento ter
+        # terminado de carregar, e a pagina ter carregado QUEM ATENDE o clique.
         _pagina_pronta(page)
-        url_antes = page.url
+        _pronto_para_govbr(page)
 
-        def _entrou_no_govbr() -> bool:
-            """Evidencia de que o clique foi atendido.
-
-            Lista larga de proposito: o erro caro aqui nao e concluir "reagiu"
-            cedo demais, e sim concluir "nao reagiu" quando reagiu — porque a
-            resposta a isso e outro clique.
-            """
-            if page.is_closed():
-                return False
-            if page.url != url_antes:
-                return True
-            if _ha_hcaptcha(page):
-                return True
-            for sel in ("#login-certificate", "text=Seu certificado digital"):
-                try:
-                    if page.locator(sel).first.is_visible(timeout=200):
-                        return True
-                except Exception:
-                    continue
-            # Ultimo recurso: o proprio botao saiu da tela.
-            try:
-                return not page.locator(SEL_GOVBR).first.is_visible(timeout=200)
-            except Exception:
-                return True
-
-        if not _clicar_ate_reagir(lambda: page.locator(SEL_GOVBR).first,
-                                  _entrou_no_govbr, "'Entrar com gov.br'"):
+        if not _clicar_ate_reagir(page,
+                                  lambda: _achar_govbr(page, timeout_ms=500)[0],
+                                  sel_govbr, _prova_govbr(page, page.url),
+                                  "'Entrar com gov.br'"):
             registrar_erro("Login: 'Entrar com gov.br' nao produziu reacao na pagina.")
             return False
 
