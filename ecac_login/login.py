@@ -12,6 +12,7 @@ Pre-requisitos no .env do projeto chamador:
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -739,93 +740,180 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         "que caracteriza acesso automatizado. Tente novamente mais tarde"
     )
 
-    def _detectar_erro_alterar() -> str | None:
-        for msg in ERROS_FATAIS + [ERRO_ACESSO_AUTOMATIZADO]:
+    # Seletores do "x" que fecha o dialogo de perfil, do mais preciso ao mais
+    # desesperado. A pagina do eCAC tem VARIOS ui-dialog, quase todos ocultos —
+    # por isso cada seletor e resolvido em TODOS os elementos que casam, nunca
+    # so no primeiro: `.first` cai no "x" de um dialogo escondido.
+    SEL_FECHAR_POPUP = [
+        'div.ui-dialog:has(#formPJ) a.ui-dialog-titlebar-close',
+        'div.ui-dialog:has(#txtNIPapel2) a.ui-dialog-titlebar-close',
+        'a.ui-dialog-titlebar-close:has(span.ui-icon-closethick)',
+        'a.ui-dialog-titlebar-close',
+        'span.ui-icon-closethick',
+        'xpath=/html/body/div[11]/div[1]/a',
+    ]
+
+    def _popup_aberto() -> bool:
+        """True enquanto o dialogo de perfil estiver na tela."""
+        for sel in ("#txtNIPapel2", "div.ui-dialog:has(#formPJ)"):
             try:
-                if page.locator(f'text={msg}').first.is_visible(timeout=1_500):
-                    return msg
+                if page.locator(sel).first.is_visible(timeout=500):
+                    return True
             except Exception:
                 continue
         return False
 
-    def _fechar_popup_e_sair():
+    def _mensagem_de_erro() -> str:
+        """O texto da recusa que o eCAC mostrou, COMO ESTA NA TELA.
+
+        Ancorado na CLASSE `mensagemErro`, com que o portal marca toda recusa
+        da troca de perfil. A lista de frases conhecidas fica como reserva: uma
+        redacao nova ("...expirou em 28/02/2023") nao esta em lista nenhuma, e
+        precisa ser reconhecida do mesmo jeito.
+        """
+        for sel in ("p.mensagemErro", ".mensagemErro"):
+            try:
+                candidatos = page.locator(sel).all()
+            except Exception:
+                continue
+            for loc in candidatos:
+                try:
+                    if not loc.is_visible(timeout=300):
+                        continue
+                    texto = " ".join((loc.inner_text() or "").split())
+                except Exception:
+                    continue
+                if texto:
+                    return texto
+        for msg in ERROS_FATAIS + [ERRO_ACESSO_AUTOMATIZADO]:
+            try:
+                if page.locator(f"text={msg}").first.is_visible():
+                    return msg
+            except Exception:
+                continue
+        return ""
+
+    def _fechar_popup() -> bool:
+        """Fecha o dialogo de perfil. NAO desloga.
+
+        Sair com Seguranca aqui derrubava a sessao a cada recusa de procuracao:
+        a empresa SEGUINTE, do mesmo certificado, era obrigada a refazer o login
+        inteiro — com captcha, minutos e mais uma sessao no limite do gov.br.
+        Quem abriu a sessao e quem decide encerra-la.
+        """
+        if not _popup_aberto():
+            return True
         print("  -> Fechando popup de perfil...")
+        for sel in SEL_FECHAR_POPUP:
+            try:
+                alvos = page.locator(sel).all()
+            except Exception:
+                continue
+            for alvo in alvos:
+                try:
+                    if not alvo.is_visible(timeout=300):
+                        continue
+                    alvo.click(timeout=3_000)
+                except Exception:
+                    continue
+                if not _popup_aberto():
+                    return True
         try:
-            page.locator('xpath=/html/body/div[11]/div[1]/a/span').first.click(timeout=5_000)
+            page.keyboard.press("Escape")
         except Exception:
             pass
-        page.wait_for_timeout(1_000)
-        print("  -> Clicando em 'Sair com Seguranca'...")
-        try:
-            page.locator('xpath=//*[@id="sairSeguranca"]/span').first.click(timeout=5_000)
-        except Exception:
-            pass
-        page.wait_for_timeout(5_000)
+        if not _popup_aberto():
+            print("  -> popup fechado com Esc.")
+            return True
+        print("  -> [AVISO] o popup de perfil continuou na tela.")
+        return False
 
-    def _clicar_alterar():
-        submit_btn = page.locator('xpath=//*[@id="formPJ"]/input[4]').first
+    def _clicar_alterar() -> bool:
+        """Aciona o "Alterar" do formPJ — UMA VEZ SO.
+
+        A escada antiga (click -> force-click -> DOM click) mandava ate TRES
+        envios do mesmo formulario numa unica passagem, e o eCAC le repeticao
+        como "acesso automatizado". Pior: o timeout do Playwright nao distingue
+        "nao cliquei" de "cliquei e a pagina mudou embaixo de mim", e o segundo
+        caso e o comum — o force-click seguinte era um segundo envio de um
+        clique que ja tinha dado certo.
+
+        Por isso: um clique, e quem julga o resultado e a TELA.
+        """
         try:
-            submit_btn.click(timeout=5_000)
-            print("  -> clicado.")
-            return
+            page.locator('#formPJ input[value="Alterar"], '
+                         '#formPJ input[onclick*="validaCaptcha"], '
+                         '#formPJ input[type="submit"]').first.click(timeout=5_000)
+            print("  -> clicado (uma vez).")
+            return True
         except Exception as e:
-            print(f"  -> click normal falhou ({type(e).__name__}). Tentando force-click...")
-        try:
-            submit_btn.click(force=True, timeout=3_000)
-            print("  -> force-click ok.")
-            return
-        except Exception as e2:
-            print(f"  -> force-click falhou ({type(e2).__name__}). Tentando DOM .click()...")
-        try:
-            result = page.evaluate(
-                """() => {
-                    const f = document.getElementById('formPJ');
-                    if (!f) return 'no-form';
-                    const candidates = Array.from(f.querySelectorAll('input')).filter(
-                        i => i.value === 'Alterar' || (i.getAttribute('onclick')||'').includes('validaCaptcha')
-                    );
-                    if (candidates.length === 0) return 'no-button';
-                    const visible = candidates.find(b => b.offsetParent !== null) || candidates[0];
-                    visible.click();
-                    return 'clicked:' + (visible.offsetParent !== null ? 'visible' : 'hidden');
-                }"""
-            )
-            print(f"  -> DOM click resultado: {_resultado_de_clique(result)}")
-        except Exception as e3:
-            print(f"  -> falhou tudo: {type(e3).__name__}")
+            print(f"  -> o clique nao confirmou ({type(e).__name__}); "
+                  "deixando a tela decidir.")
+            return True
 
-    MAX_TENTATIVAS_ALTERAR = 5
-    for tentativa_alterar in range(1, MAX_TENTATIVAS_ALTERAR + 1):
-        print(f"Clicando no botao 'Alterar' (formPJ) — tentativa {tentativa_alterar}...")
+    def _desfecho(timeout_ms: int = 25_000) -> tuple[str, str]:
+        """Espera a TELA responder ao unico clique: (estado, mensagem).
+
+        estado: "ok" (popup fechou), "erro" (mensagem na tela) ou "timeout".
+
+        Poll curto em vez de pausa fixa: o caminho feliz sai no instante em que
+        o popup fecha, e o de erro assim que a mensagem aparece. A pausa cega de
+        2,5s de antes olhava a tela cedo demais — a resposta do portal ainda nao
+        tinha chegado, e o codigo concluia "nada aconteceu" e clicava de novo.
+
+        O popup fechado e confirmado DUAS vezes: durante um update do PrimeFaces
+        o dialogo some por um instante e volta, e um "ok" nesse intervalo daria
+        a troca por feita sem ela ter acontecido.
+        """
+        limite = time.monotonic() + timeout_ms / 1000.0
+        fechado_antes = False
+        while True:
+            msg = _mensagem_de_erro()
+            if msg:
+                return "erro", msg
+            fechado = not _popup_aberto()
+            if fechado and fechado_antes:
+                return "ok", ""
+            fechado_antes = fechado
+            if time.monotonic() >= limite:
+                return "timeout", ""
+            try:
+                page.wait_for_timeout(400)
+            except Exception:
+                return "timeout", ""
+
+    # UM envio por passagem. A segunda passagem existe SO para o caso de a tela
+    # nao ter reagido de forma nenhuma — ai o primeiro clique provavelmente nao
+    # chegou ao botao. Qualquer mensagem de erro encerra aqui: nem a procuracao
+    # nem o "acesso automatizado" mudam de resposta com um clique a mais, e no
+    # segundo caso a repeticao e justamente a causa.
+    MAX_ENVIOS_ALTERAR = 2
+    for tentativa_alterar in range(1, MAX_ENVIOS_ALTERAR + 1):
+        print(f"Clicando no botao 'Alterar' (formPJ) — envio {tentativa_alterar} "
+              f"de no maximo {MAX_ENVIOS_ALTERAR}...")
         _clicar_alterar()
 
-        page.wait_for_timeout(2_500)
+        estado, erro = _desfecho()
 
-        erro = _detectar_erro_alterar()
-
-        if erro == ERRO_ACESSO_AUTOMATIZADO:
-            print(f"  -> [acesso automatizado] detectado. Aguardando 10s e tentando novamente...")
-            page.wait_for_timeout(10_000)
-            if tentativa_alterar == MAX_TENTATIVAS_ALTERAR:
-                registrar_erro("Acesso automatizado detectado ao alterar o perfil: "
-                               f"limite de {MAX_TENTATIVAS_ALTERAR} tentativas atingido.")
-                print("  -> Limite de tentativas atingido para erro de acesso automatizado. Abortando.")
-                _fechar_popup_e_sair()
-                return False
-            continue
-
-        if erro:
+        if estado == "erro":
             registrar_erro(erro)
-            _fechar_popup_e_sair()
+            print(f"  -> [RECUSADO pelo eCAC] {erro}")
+            _fechar_popup()
             return False
 
-        print("Aguardando popup fechar (ate 20s)...")
-        try:
-            page.locator("#txtNIPapel2").first.wait_for(state="hidden", timeout=20_000)
-            print("  -> popup fechou.")
-        except Exception:
-            print("  -> popup nao fechou no tempo esperado, seguindo mesmo assim.")
-        break
+        if estado == "ok":
+            break
+
+        # "timeout": a tela nao disse nem sim nem nao.
+        if tentativa_alterar < MAX_ENVIOS_ALTERAR:
+            print("  -> a tela nao reagiu ao 'Alterar'; um segundo envio, agora "
+                  "bem separado do primeiro.")
+            continue
+        print("  -> popup NAO fechou: a troca de perfil nao se confirmou.")
+        registrar_erro("Troca de perfil nao confirmada: o popup do formPJ "
+                       "continuou na tela apos o envio.")
+        _fechar_popup()
+        return False
 
     try:
         page.wait_for_load_state("domcontentloaded", timeout=15_000)
