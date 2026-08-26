@@ -428,6 +428,25 @@ def encerrar_sessao(p=None, context=None) -> None:
         pass
 
 
+# A ultima mensagem de recusa que o eCAC mostrou na troca de perfil.
+#
+# Existe porque `garantir_acesso_ecac` devolve apenas True/False, e o texto e
+# apagado da tela logo em seguida: `_fechar_popup()` remove o dialogo, e com ele
+# o <p class="mensagemErro">. Quem chamava olhava a tela DEPOIS e nao achava
+# nada — em producao isso virou "Falha no login" para procuracao expirada,
+# cancelada, inexistente e ate para a deteccao de automacao, tudo no mesmo
+# balaio. A planilha do usuario recebia o mesmo texto vago em todas as linhas.
+_ULTIMA_RECUSA = {"mensagem": ""}
+
+
+def ultima_recusa_de_perfil() -> str:
+    """A mensagem da ultima recusa de troca de perfil, ou "" se nao houve.
+
+    Vale ate a proxima chamada de `garantir_acesso_ecac`, que a limpa.
+    """
+    return _ULTIMA_RECUSA["mensagem"]
+
+
 def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                          policy_ok: bool = True, cert_serial: str = "") -> bool:
     """Garante eCAC autenticado com o perfil PJ do CNPJ, numa sessao EXISTENTE.
@@ -444,6 +463,8 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     False quando nao foi possivel garantir isso. `AcessoBloqueado` continua
     subindo para quem decide reiniciar.
     """
+
+    _ULTIMA_RECUSA["mensagem"] = ""
 
     def _captcha_fn(chamadas: int, resolvido: bool, rodadas: int) -> None:
         if metrics:
@@ -898,6 +919,8 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         if estado == "erro":
             registrar_erro(erro)
             print(f"  -> [RECUSADO pelo eCAC] {erro}")
+            # Guardado ANTES de fechar: o popup leva a mensagem embora.
+            _ULTIMA_RECUSA["mensagem"] = erro
             _fechar_popup()
             return False
 
