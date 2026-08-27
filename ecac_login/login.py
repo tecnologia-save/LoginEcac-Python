@@ -48,6 +48,51 @@ class DispositivosMaximo(Exception):
     pass
 
 
+class PortalIndisponivel(Exception):
+    """O portal nao respondeu — rede, DNS ou o servidor da Receita fora do ar.
+
+    Existe para separar "o PORTAL falhou" de "esta EMPRESA falhou". Sao a mesma
+    coisa para o codigo e coisas opostas para o usuario: uma empresa recusada ja
+    era, e um portal fora do ar volta em minutos.
+
+    Em producao (27/08/2026, 10:39 as 10:42) o cav.receita.fazenda.gov.br ficou
+    fora tres minutos. Como o `goto` apenas devolvia False, cada empresa da fila
+    entrou, bateu no mesmo ERR_CONNECTION_TIMED_OUT e saiu como "nao tentada":
+    cinco queimadas em tres minutos. Uma delas ja estava na repescagem, gastou a
+    ultima chance que tinha e terminou a execucao sem nunca ter sido tentada de
+    verdade.
+
+    Quem trata espera e tenta de novo, sem consumir a proxima da fila.
+    """
+
+
+# Assinaturas de falha de REDE nas excecoes do Playwright. O Chromium prefixa os
+# erros de rede com "net::ERR_"; o restante cobre o que ele reporta antes de ter
+# um erro de rede formado (DNS que nao resolve, conexao recusada).
+_MARCAS_DE_REDE = (
+    "net::err_",
+    "err_connection",
+    "err_name_not_resolved",
+    "err_internet_disconnected",
+    "err_address_unreachable",
+    "err_network_changed",
+    "err_timed_out",
+    "err_empty_response",
+)
+
+
+def _falha_de_rede(e: Exception) -> bool:
+    """True quando a excecao veio da REDE, e nao da pagina.
+
+    O TimeoutError do `goto` entra: com `wait_until="commit"` ele so estoura se
+    o servidor nao chegou a responder nada — pagina lenta ja teria commitado.
+    """
+    if type(e).__name__ == "TimeoutError":
+        return True
+    texto = str(e).lower()
+    return any(marca in texto for marca in _MARCAS_DE_REDE)
+
+
 MENSAGEM_DISPOSITIVOS_MAXIMOS = (
     "Você atingiu o número máximo de dispositivos conectados simultaneamente com esta conta."
 )
@@ -310,6 +355,17 @@ CLIQUES_GOVBR = 3
 ESPERA_PROVA_MS = 6_000     # janela para a pagina reagir a um clique
 PASSO_PROVA_MS = 250
 
+# Janela para o formPJ se enviar SOZINHO antes de clicarmos no "Alterar". Ver
+# `_enviar_uma_vez`: em producao, todo envio que o eCAC aceitou foi da propria
+# pagina, e todo envio nosso que chegou com a procuracao valida virou "acesso
+# automatizado".
+#
+# 2,5s porque nos casos observados a reacao ja estava em curso quando o `[diag]`
+# rodava, algumas centenas de milissegundos depois do `fill`. E o custo maximo:
+# quando ninguem envia, paga-se a janela e clica-se igual.
+ESPERA_ENVIO_ESPONTANEO = 2_500
+PASSO_ENVIO_ESPONTANEO = 250
+
 
 def _pagina_pronta(page, timeout_ms: int = 10_000) -> bool:
     """True quando o documento terminou de carregar.
@@ -535,6 +591,59 @@ def _prova_govbr(page, url_antes: str):
             return True
 
     return _reagiu
+
+
+def _enviar_uma_vez(reacao, clicar, dormir, espera_ms: int = None,
+                    passo_ms: int = None) -> str:
+    """Deixa o formulario enviado UMA vez. Devolve quem enviou: "pagina" ou "clique".
+
+    A regra: dar a propria pagina a chance de enviar, e clicar so se ela nao
+    enviar. Nunca e pior do que clicar de cara — no pior caso gasta a janela e
+    clica igual.
+
+    Nao e paranoia; e o que os numeros de producao mostram. Na execucao de
+    27/08/2026, as 29 trocas de perfil se dividiram assim:
+
+        clique confirmou      ->  0 trocas | 11 "acesso automatizado" | 6 recusas
+        clique NAO confirmou  -> 12 trocas |  0 "acesso automatizado" | 0 recusas
+
+    Nenhuma troca bem-sucedida veio de um clique que confirmou. E o `[diag]`
+    mostra por que: nas passagens que deram certo o botao aparecia com
+    `visible: False` e o campo com `preenchido: False` — o formulario JA estava
+    sendo enviado, por um ajax do PrimeFaces disparado no `fill`, e o clique
+    chegava tarde (ou nem chegava).
+
+    A leitura que fecha com os 29 casos: quando o envio e nosso, o eCAC o marca
+    como automatizado; quando e da propria pagina, passa. As 6 recusas de
+    procuracao confirmam que o clique CHEGA ao servidor — ele so nao e o caminho
+    que o portal aceita.
+
+    E uma hipotese, e o `via=` no log existe para mede-la: se "pagina" vier junto
+    com troca concluida e "clique" junto com "acesso automatizado", esta certa.
+
+    `reacao` devolve texto nao vazio quando a tela ja reagiu; `clicar` faz o
+    clique; `dormir` recebe milissegundos. Sao parametros, e nao chamadas
+    diretas, para que a POLITICA possa ser testada sem navegador.
+    """
+    espera_ms = ESPERA_ENVIO_ESPONTANEO if espera_ms is None else espera_ms
+    passo_ms = PASSO_ENVIO_ESPONTANEO if passo_ms is None else passo_ms
+
+    limite = time.monotonic() + espera_ms / 1000.0
+    while True:
+        try:
+            ja_reagiu = reacao()
+        except Exception:
+            ja_reagiu = ""
+        if ja_reagiu:
+            print(f"  -> [via=pagina] a propria tela enviou o formulario "
+                  f"(reacao: {ja_reagiu}); nao ha o que clicar.")
+            return "pagina"
+        if time.monotonic() >= limite:
+            break
+        dormir(passo_ms)
+
+    clicar()
+    return "clique"
 
 
 def _clicar_por_todas_as_vias(page, localizar, seletor_css: str,
@@ -832,11 +941,46 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     def _ja_logado():
         return "cav.receita.fazenda.gov.br/ecac" in page.url and "autenticacao" not in page.url
 
+    def _dashboard_na_tela(timeout_ms: int = 5_000) -> bool:
+        """O dashboard do eCAC esta visivel — prova de login que a URL nao da.
+
+        `_ja_logado` le a URL, e a URL mente nos instantes em que o gov.br ainda
+        esta redirecionando: o login ja valeu, o dashboard ja desenhou, e a barra
+        de enderecos ainda mostra um passo intermediario da autenticacao.
+
+        Foi o que derrubou a linha 4 em producao (27/08/2026, 10:23): o captcha
+        pos-certificado foi resolvido, o botao "Seu certificado digital" sumiu da
+        tela — porque o login TINHA dado certo — e a automacao leu o sumico do
+        botao como fracasso e abortou a empresa.
+
+        So e chamada nos caminhos de desistencia, entao os 5s nao entram no custo
+        de nenhuma execucao que esta indo bem.
+        """
+        try:
+            page.locator("#btnPerfil").first.wait_for(state="visible",
+                                                      timeout=timeout_ms)
+            return True
+        except Exception:
+            return False
+
+    def _autenticado() -> bool:
+        """Login confirmado pela URL ou pelo dashboard, o que aparecer primeiro."""
+        return _ja_logado() or _dashboard_na_tela()
+
     print("Abrindo o eCAC ...")
     try:
         page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
         print("  -> pagina inicial carregada.")
     except Exception as e:
+        # Rede fora e falha da empresa nao podem terminar igual. Devolver False
+        # aqui manda a empresa embora como "nao tentada" e libera a proxima da
+        # fila para bater no mesmo muro — foi assim que uma queda de tres
+        # minutos consumiu cinco empresas de uma vez. `PortalIndisponivel` sobe
+        # para quem sabe esperar.
+        if _falha_de_rede(e):
+            print(f"  -> o portal nao respondeu ({type(e).__name__}); "
+                  "isso e a REDE, nao esta empresa.")
+            raise PortalIndisponivel(str(e)) from e
         print(f"  -> erro no goto: {type(e).__name__}")
         return False
 
@@ -933,7 +1077,10 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                 break
 
             if not _clicar_certificado():
-                if _ja_logado():
+                # O botao some por DOIS motivos opostos: a pagina quebrou, ou o
+                # login ja aconteceu e nao ha mais o que apresentar. Conferir o
+                # dashboard antes de abortar e o que separa os dois.
+                if _autenticado():
                     print("  -> botao nao encontrado mas pagina ja esta logada. Continuando.")
                     break
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
@@ -983,12 +1130,22 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                 print("  -> login realizado apos captcha.")
                 break
 
+            # Segunda opiniao antes de recarregar: a URL as vezes ainda mostra um
+            # passo do gov.br enquanto o dashboard ja esta desenhado. Recarregar
+            # nesse instante joga fora um login que deu certo — e foi assim que
+            # a tela seguinte apareceu sem o botao do certificado e a empresa foi
+            # abortada. Os 5s so sao pagos aqui, onde a alternativa e um reload.
+            if _dashboard_na_tela():
+                print("  -> login confirmado pelo dashboard (a URL ainda nao "
+                      "tinha acompanhado).")
+                break
+
             if tentativa_cert < MAX_TENTATIVAS_CERT:
                 print(f"  -> login nao concluido. Recarregando e tentando novamente...")
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_timeout(2_000)
             else:
-                if _ja_logado():
+                if _autenticado():
                     print("  -> ultima tentativa mas pagina ja esta logada. Continuando.")
                     break
                 registrar_erro("Login: nao concluido apos todas as tentativas com certificado digital.")
@@ -1223,28 +1380,27 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         print("  -> [AVISO] o popup de perfil continuou na tela.")
         return False
 
-    def _clicar_alterar() -> bool:
-        """Aciona o "Alterar" do formPJ — UMA VEZ SO.
+    def _reacao_da_tela() -> str:
+        """O que a tela ja esta dizendo AGORA: "erro", "ok" ou "" (nada ainda)."""
+        if _mensagem_de_erro():
+            return "erro"
+        if not _popup_aberto():
+            return "ok"
+        return ""
 
-        A escada antiga (click -> force-click -> DOM click) mandava ate TRES
-        envios do mesmo formulario numa unica passagem, e o eCAC le repeticao
-        como "acesso automatizado". Pior: o timeout do Playwright nao distingue
-        "nao cliquei" de "cliquei e a pagina mudou embaixo de mim", e o segundo
-        caso e o comum — o force-click seguinte era um segundo envio de um
-        clique que ja tinha dado certo.
-
-        Por isso: um clique, e quem julga o resultado e a TELA.
-        """
+    def _clicar_no_alterar() -> None:
         try:
             page.locator('#formPJ input[value="Alterar"], '
                          '#formPJ input[onclick*="validaCaptcha"], '
                          '#formPJ input[type="submit"]').first.click(timeout=5_000)
-            print("  -> clicado (uma vez).")
-            return True
+            print("  -> [via=clique] clicado (uma vez).")
         except Exception as e:
-            print(f"  -> o clique nao confirmou ({type(e).__name__}); "
+            print(f"  -> [via=clique] o clique nao confirmou ({type(e).__name__}); "
                   "deixando a tela decidir.")
-            return True
+
+    def _clicar_alterar() -> str:
+        return _enviar_uma_vez(_reacao_da_tela, _clicar_no_alterar,
+                               page.wait_for_timeout)
 
     def _desfecho(timeout_ms: int = 25_000) -> tuple[str, str]:
         """Espera a TELA responder ao unico clique: (estado, mensagem).
@@ -1286,15 +1442,18 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     for tentativa_alterar in range(1, MAX_ENVIOS_ALTERAR + 1):
         # Daqui em diante a falha e DESTA empresa: o CNPJ ja esta no campo.
         _CHEGOU_NA_TROCA["sim"] = True
-        print(f"Clicando no botao 'Alterar' (formPJ) — envio {tentativa_alterar} "
+        print(f"Enviando o 'Alterar' (formPJ) — envio {tentativa_alterar} "
               f"de no maximo {MAX_ENVIOS_ALTERAR}...")
-        _clicar_alterar()
+        via = _clicar_alterar()
 
         estado, erro = _desfecho()
 
         if estado == "erro":
             registrar_erro(erro)
-            print(f"  -> [RECUSADO pelo eCAC] {erro}")
+            # O `via=` sai junto com a recusa de proposito: e o par
+            # (quem enviou, o que o portal respondeu) que confirma ou derruba a
+            # hipotese de `_enviar_uma_vez` na proxima execucao real.
+            print(f"  -> [RECUSADO pelo eCAC | via={via}] {erro}")
             # Guardado ANTES de fechar: o popup leva a mensagem embora.
             _ULTIMA_RECUSA["mensagem"] = erro
             _fechar_popup()
@@ -1318,6 +1477,6 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         page.wait_for_load_state("domcontentloaded", timeout=15_000)
     except Exception:
         pass
-    print("  -> perfil de acesso alterado.")
+    print(f"  -> perfil de acesso alterado (via={via}).")
     print("Concluido.")
     return True
