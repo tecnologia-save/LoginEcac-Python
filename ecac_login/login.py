@@ -1077,12 +1077,26 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                 break
 
             if not _clicar_certificado():
-                # O botao some por DOIS motivos opostos: a pagina quebrou, ou o
-                # login ja aconteceu e nao ha mais o que apresentar. Conferir o
-                # dashboard antes de abortar e o que separa os dois.
+                # O botao some por TRES motivos, e so um deles e defeito:
+                #
+                #   1. o login ja aconteceu e nao ha mais o que apresentar;
+                #   2. o gov.br trocou a tela pela do limite de dispositivos,
+                #      que nao tem botao de certificado nenhum;
+                #   3. a pagina quebrou de verdade.
+                #
+                # Sem o caso 2 aqui, uma conta no limite reportava "botao nao
+                # encontrado" em toda tentativa — inclusive nas seguintes, ja que
+                # o limite persiste — e a automacao chamadora recebia apenas
+                # `None`, que ela traduz como "login nao concluido". A causa
+                # ficava so neste log, com outro nome de arquivo, e ninguem
+                # cruzava os dois.
                 if _autenticado():
                     print("  -> botao nao encontrado mas pagina ja esta logada. Continuando.")
                     break
+                if MENSAGEM_DISPOSITIVOS_MAXIMOS in _conteudo(page):
+                    registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
+                    print("  -> [DISPOSITIVOS] a tela do limite substituiu a do certificado.")
+                    raise DispositivosMaximo()
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
                 print("[cert] Botao nao encontrado. Abortando.")
                 return False
