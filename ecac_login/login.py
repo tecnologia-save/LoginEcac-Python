@@ -310,6 +310,21 @@ def _montar_launch_kwargs(user_data_dir: str, *,
         args=args,
     )
 
+    # Gravacao de HAR, ligada so por ambiente (ECAC_HAR_PATH). Existe para uma
+    # comparacao especifica: o mesmo processo feito A MAO no Chrome exporta um
+    # HAR pelo DevTools, e este aqui produz o artefato equivalente do lado
+    # automatizado. Sem os dois no mesmo formato, comparar "manual e mais
+    # rapido" com o log da automacao e comparar impressao com medida.
+    #
+    # `record_har_content="omit"` descarta os CORPOS das respostas: o que
+    # interessa e o tempo de cada requisicao, e sem isso o arquivo passa de
+    # centenas de MB. ATENCAO: o HAR ainda carrega cabecalhos e cookies de
+    # sessao — trate como credencial.
+    har = os.getenv("ECAC_HAR_PATH", "").strip()
+    if har:
+        kwargs["record_har_path"] = har
+        kwargs["record_har_content"] = "omit"
+
     if cert_pfx_path is None:
         args.append(_build_auto_select_cert_flag(cert_subject_cn))
         return kwargs
