@@ -326,11 +326,28 @@ def _montar_launch_kwargs(user_data_dir: str, *,
     return kwargs
 
 
+# Orcamento de tempo de UMA chamada ao solver, em segundos.
+#
+# Sem ele o solver nao tem teto nenhum: `solve_hcaptcha(page)` deixa
+# `politica.fim = None`, e com `fim` None a propriedade `esgotado` e sempre
+# False — logo TODAS as verificacoes de orcamento dentro do solver viram no-op.
+# Os lacos aninhados entao ficam livres para o pior caso do proprio codigo:
+# 3 modelos x MAX_GEMINI_TRIES(3) x max_rounds(5) x max_rounds(6), tudo isso
+# vezes as 3 tentativas daqui. Foi assim que uma etapa de captcha comeu minutos
+# no log de 28/08, com ReadTimeout em modelo apos modelo.
+#
+# 90s vem da aritmetica do solver: GEMINI_TIMEOUT_MS e 20s e a bancada tem 3
+# modelos, entao uma cadeia cheia custa 60s; sobra espaco para uma rodada de
+# screenshot, clique e verificacao. Com as 3 tentativas daqui, a etapa inteira
+# passa a custar no maximo ~4,5 minutos em vez de ilimitado.
+ORCAMENTO_CAPTCHA_S = 90.0
+
+
 def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None) -> bool:
     print(f"[{etapa}] Verificando hCaptcha (ate {max_attempts} tentativas)...")
     for tentativa in range(1, max_attempts + 1):
         try:
-            resultado = solve_hcaptcha(page)
+            resultado = solve_hcaptcha(page, deadline_s=ORCAMENTO_CAPTCHA_S)
             if resultado:
                 print(f"[{etapa}] tentativa {tentativa}/{max_attempts}: OK (resolvido ou ausente).")
                 return True
