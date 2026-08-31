@@ -39,6 +39,19 @@ MENSAGEM_ACESSO_BLOQUEADO = (
     "que o caracteriza como um acesso automatizado."
 )
 
+# Quantas vezes RELANCAR o Chrome quando o portal acusa acesso automatizado.
+# O bloqueio e da JANELA, nao da conta: o gov.br olha atributos da sessao, e
+# uma janela ja marcada continua marcada por mais que se insista nela. Quem
+# limpa e um Chrome novo — por isso a tentativa mora em `main`, onde o
+# navegador nasce, e nao no meio do fluxo de login.
+#
+# Com teto de proposito. "Ate parar de aparecer" vira um laco infinito abrindo
+# e fechando Chrome quando o bloqueio olha o IP, que relancamento nenhum muda.
+TENTATIVAS_ACESSO_BLOQUEADO = 4
+# Reabrir na hora costuma cair no mesmo bloqueio, e ainda arrisca achar o
+# diretorio de perfil ainda preso pelo Chrome anterior.
+ESPERA_ACESSO_BLOQUEADO_S = 5
+
 
 class AcessoBloqueado(Exception):
     pass
@@ -865,28 +878,47 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     print("[cert] Modo PFX explicito." if cert_pfx_path is not None
           else "[cert] Modo Windows Certificate Store.")
 
-    p = sync_playwright().start()
-    print("Lancando Chrome...")
-    context = p.chromium.launch_persistent_context(**launch_kwargs)
-    print("Chrome lancado.")
-
-    page = context.pages[0] if context.pages else context.new_page()
-    print("Pagina obtida.")
-
     # Quem LANCA fecha. Ponto unico: antes, cada caminho de falha decidia por si
     # se fechava, e alguns nao fechavam — o Chrome ficava vivo segurando o
     # diretorio de perfil, e quem tentasse remover o temporario depois batia em
     # PermissionError no Windows.
-    try:
-        ok = garantir_acesso_ecac(page, cnpj, metrics=metrics,
-                                  policy_ok=policy_ok, cert_serial=cert_serial)
-    except BaseException:
-        encerrar_sessao(p, context)
-        raise
-    if not ok:
-        encerrar_sessao(p, context)
-        return None
-    return p, context, page
+    #
+    # O laco existe por um caso so: o bloqueio por acesso automatizado. Ele
+    # condena a JANELA, entao a saida e trocar de janela — fechar esta e abrir
+    # outra ate o portal deixar entrar. Toda outra falha sai na primeira volta,
+    # e o `raise`/`return` de cada caminho garante isso.
+    for tentativa in range(1, TENTATIVAS_ACESSO_BLOQUEADO + 1):
+        p = sync_playwright().start()
+        print("Lancando Chrome...")
+        context = p.chromium.launch_persistent_context(**launch_kwargs)
+        print("Chrome lancado.")
+
+        page = context.pages[0] if context.pages else context.new_page()
+        print("Pagina obtida.")
+
+        try:
+            ok = garantir_acesso_ecac(page, cnpj, metrics=metrics,
+                                      policy_ok=policy_ok, cert_serial=cert_serial)
+        except AcessoBloqueado:
+            # Fechar ANTES de decidir: o Chrome bloqueado nao serve nem para a
+            # proxima tentativa nem para quem receber a excecao.
+            encerrar_sessao(p, context)
+            if tentativa == TENTATIVAS_ACESSO_BLOQUEADO:
+                print(f"  -> acesso bloqueado em {tentativa} aberturas de "
+                      f"navegador seguidas. Desistindo.")
+                raise
+            print(f"  -> acesso bloqueado ({tentativa}/"
+                  f"{TENTATIVAS_ACESSO_BLOQUEADO}). Reabrindo o navegador em "
+                  f"{ESPERA_ACESSO_BLOQUEADO_S}s...")
+            time.sleep(ESPERA_ACESSO_BLOQUEADO_S)
+            continue
+        except BaseException:
+            encerrar_sessao(p, context)
+            raise
+        if not ok:
+            encerrar_sessao(p, context)
+            return None
+        return p, context, page
 
 
 def encerrar_sessao(p=None, context=None) -> None:
@@ -944,6 +976,18 @@ def ultima_recusa_de_perfil() -> str:
     Vale ate a proxima chamada de `garantir_acesso_ecac`, que a limpa.
     """
     return _ULTIMA_RECUSA["mensagem"]
+
+
+def _acesso_bloqueado(page) -> bool:
+    """A pagina esta exibindo o bloqueio por "acesso automatizado"?
+
+    O aviso vem dentro de um `div.login-caixa-erros-validacao`, mas quem decide
+    aqui e o TEXTO. Aquela caixa e a de erros de validacao do login em geral —
+    serve tambem para certificado recusado e afins — entao casar pela classe
+    trataria qualquer recusa como bloqueio. E a resposta a um bloqueio, jogar o
+    Chrome fora e abrir outro, e cara demais para ser dada por engano.
+    """
+    return MENSAGEM_ACESSO_BLOQUEADO in _conteudo(page)
 
 
 def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
@@ -1018,7 +1062,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
 
     page.wait_for_timeout(1_500)
     print("Verificando bloqueio de acesso automatizado...")
-    if MENSAGEM_ACESSO_BLOQUEADO in _conteudo(page):
+    if _acesso_bloqueado(page):
         registrar_erro("Login: acesso bloqueado — pagina exibiu mensagem de acesso automatizado.")
         print("  -> [BLOQUEADO] Acesso bloqueado. Sinalizando reinicio...")
         raise AcessoBloqueado()
@@ -1062,6 +1106,18 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         # terminado de carregar, e a pagina ter carregado QUEM ATENDE o clique.
         _pagina_pronta(page)
         _pronto_para_govbr(page)
+
+        # Segunda conferencia, agora COLADA no clique. A primeira foi logo
+        # depois do `goto`, e o bloqueio nao chega so na abertura: ele aparece
+        # tambem enquanto a tela de login se monta, depois do "Voltar para a
+        # pagina de login" e durante as duas esperas acima. Clicar com o aviso
+        # ja na tela gasta o captcha e o certificado para terminar em recusa.
+        if _acesso_bloqueado(page):
+            registrar_erro("Login: acesso bloqueado — aviso de acesso automatizado "
+                           "antes do clique em 'Entrar com gov.br'.")
+            print("  -> [BLOQUEADO] aviso de acesso automatizado na tela de login. "
+                  "Sinalizando reinicio...")
+            raise AcessoBloqueado()
 
         if not _clicar_ate_reagir(page,
                                   lambda: _achar_govbr(page, timeout_ms=500)[0],
