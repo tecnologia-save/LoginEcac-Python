@@ -47,7 +47,12 @@ MENSAGEM_ACESSO_BLOQUEADO = (
 #
 # Com teto de proposito. "Ate parar de aparecer" vira um laco infinito abrindo
 # e fechando Chrome quando o bloqueio olha o IP, que relancamento nenhum muda.
-TENTATIVAS_ACESSO_BLOQUEADO = 4
+# Duas, nao quatro. Cada volta custa um captcha resolvido — tempo e chamadas de
+# API — para ser recusada no mesmo ponto, e uma rajada de logins seguidos e
+# justamente o padrao que piora a reputacao da sessao no portal. Quando o
+# bloqueio e passageiro, a segunda volta resolve; quando nao e, insistir mais
+# nao vai resolver e ainda cobra o preco.
+TENTATIVAS_ACESSO_BLOQUEADO = 2
 # Reabrir na hora costuma cair no mesmo bloqueio, e ainda arrisca achar o
 # diretorio de perfil ainda preso pelo Chrome anterior.
 ESPERA_ACESSO_BLOQUEADO_S = 5
@@ -59,6 +64,17 @@ class AcessoBloqueado(Exception):
 
 class DispositivosMaximo(Exception):
     pass
+
+
+class LoginCancelado(Exception):
+    """Quem chamou pediu para abortar antes de o login terminar.
+
+    Existe porque o login e a etapa mais longa e menos interrompivel da
+    execucao: captcha, certificado, e agora o relancamento do navegador. Sem um
+    jeito de perguntar "ainda quero isto?", um pedido de parada so era atendido
+    depois de tudo terminar — e quem apertou o botao via a automacao seguir
+    abrindo navegador e resolvendo captcha como se nada tivesse acontecido.
+    """
 
 
 class PortalIndisponivel(Exception):
@@ -826,7 +842,8 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
          cert_serial: str = "", *,
          cert_pfx_path: str | None = None,
          cert_pfx_passphrase: str | None = None,
-         cert_subject_cn: str | None = None):
+         cert_subject_cn: str | None = None,
+         cancelado=None):
     """Realiza o login no eCAC e retorna (playwright, context, page) autenticados.
 
     Duas formas de apresentar o certificado, mutuamente exclusivas — ver
@@ -854,6 +871,10 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         cert_pfx_passphrase: Senha do .pfx (modo A). Repassada como veio.
         cert_subject_cn: CN do certificado no store (modo B). Quando ausente,
                          mantem-se a leitura de CERT_SUBJECT_CN do ambiente.
+        cancelado: chamavel sem argumentos que devolve True quando quem chamou
+                   quer abortar. Consultado ANTES de cada abertura de navegador
+                   e durante a espera entre elas; quando devolve True, a sessao
+                   e fechada e sobe `LoginCancelado`. Sem ele, nada muda.
 
     Returns:
         Tupla (p, context, page) em caso de sucesso, ou None em caso de falha.
@@ -887,7 +908,14 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     # condena a JANELA, entao a saida e trocar de janela — fechar esta e abrir
     # outra ate o portal deixar entrar. Toda outra falha sai na primeira volta,
     # e o `raise`/`return` de cada caminho garante isso.
+    def _abortar_se_pedido() -> None:
+        if cancelado is not None and cancelado():
+            raise LoginCancelado()
+
     for tentativa in range(1, TENTATIVAS_ACESSO_BLOQUEADO + 1):
+        # Antes de LANCAR, nao depois: abrir um Chrome para descartar em
+        # seguida e o que fazia o pedido de parada parecer ignorado.
+        _abortar_se_pedido()
         p = sync_playwright().start()
         print("Lancando Chrome...")
         context = p.chromium.launch_persistent_context(**launch_kwargs)
@@ -910,7 +938,11 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
             print(f"  -> acesso bloqueado ({tentativa}/"
                   f"{TENTATIVAS_ACESSO_BLOQUEADO}). Reabrindo o navegador em "
                   f"{ESPERA_ACESSO_BLOQUEADO_S}s...")
-            time.sleep(ESPERA_ACESSO_BLOQUEADO_S)
+            # De segundo em segundo, para a espera nao virar mais um trecho
+            # em que o botao de parar nao tem efeito.
+            for _ in range(ESPERA_ACESSO_BLOQUEADO_S):
+                _abortar_se_pedido()
+                time.sleep(1)
             continue
         except BaseException:
             encerrar_sessao(p, context)
