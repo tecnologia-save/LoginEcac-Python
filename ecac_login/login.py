@@ -152,16 +152,16 @@ def _conteudo(page, tentativas: int = 3, espera_ms: int = 250) -> str:
 
         Page.content: Unable to retrieve content because the page is navigating
 
-    Os três usos desta função são **guardas**: procuram a mensagem de acesso
+    Todos os usos desta função são **guardas**: procuram a mensagem de acesso
     bloqueado ou a de número máximo de dispositivos. Deixar a exceção subir faz
     a guarda derrubar o login inteiro por não ter conseguido ler o HTML — mais
     frágil do que aquilo que ela protege. E o sintoma não sugere a causa: quem
     lê o erro procura defeito na página, não uma leitura feita cedo demais.
 
-    Os três pontos são justamente os de maior movimento — depois do `goto`,
-    depois de apresentar o certificado e depois de submeter o captcha, que por
-    definição navega. Algumas centenas de milissegundos depois a mesma leitura
-    funciona.
+    Eles ficam justamente nos pontos de maior movimento — depois do `goto`, em
+    volta do clique no gov.br, depois de submeter um captcha (que por definição
+    navega) e depois de apresentar o certificado. Algumas centenas de
+    milissegundos depois a mesma leitura funciona.
 
     Devolve `""` quando não conseguiu ler. Não ter lido não é o mesmo que a
     mensagem não estar lá, então a guarda passa — e um falso negativo aqui
@@ -1133,6 +1133,28 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                 registrar_erro("Login: hCaptcha nao resolvido apos 3 tentativas (etapa gov.br).")
                 print("[captcha] 3 tentativas falharam. Abortando.")
                 return False
+
+        # O solver devolve assim que resolve o desafio; a navegacao que o submit
+        # dispara vem DEPOIS. Sem deixar a pagina assentar, a leitura abaixo
+        # cairia no documento anterior — o de antes do submit — e nao veria
+        # aviso nenhum. Mesma dose e mesma ordem usadas na guarda de
+        # dispositivos, logo depois de apresentar o certificado.
+        page.wait_for_timeout(2_000)
+        _pagina_pronta(page)
+
+        # Terceira conferencia. O captcha e o momento em que o gov.br decide se
+        # a sessao parece gente, e a recusa nao chega como captcha errado: chega
+        # depois, como este aviso, na tela que o submit carrega. Fica FORA do
+        # `if` de cima de proposito — o bloqueio aparece tanto quando o captcha
+        # foi resolvido quanto quando ele falhou e a pagina seguiu assim mesmo.
+        # Passar batido daqui levaria o certificado a ser apresentado a uma
+        # sessao ja condenada, gastando a apresentacao para terminar em recusa.
+        if _acesso_bloqueado(page):
+            registrar_erro("Login: acesso bloqueado — aviso de acesso automatizado "
+                           "apos o captcha do 'Entrar com gov.br'.")
+            print("  -> [BLOQUEADO] aviso de acesso automatizado depois do captcha. "
+                  "Sinalizando reinicio...")
+            raise AcessoBloqueado()
 
     cert_selectors = [
         "#login-certificate",
