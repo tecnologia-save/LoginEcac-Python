@@ -1431,6 +1431,29 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     except Exception:
         pass
 
+    # Popup opcional "Em breve, o acesso ao e-CAC sera desativado": se aparecer,
+    # clica em "Continuar no e-CAC por enquanto" e segue o fluxo normalmente; se nao
+    # aparecer, apenas segue. NAO retorna (diferente do popup da Caixa Postal, que
+    # navega para outra tela): aqui so fechamos o aviso e continuamos para o perfil.
+    try:
+        aviso = page.locator('#dialog-mensagem-encerramento-ecac').first
+        if aviso.is_visible(timeout=2_000):
+            print("  -> popup 'e-CAC sera desativado' detectado. "
+                  "Clicando em 'Continuar no e-CAC por enquanto'...")
+            try:
+                page.get_by_role(
+                    "button", name="Continuar no e-CAC por enquanto"
+                ).first.click(timeout=5_000)
+            except Exception:
+                # Fallback pelo texto do botao (a mesma acao).
+                page.locator(
+                    'button:has-text("Continuar no e-CAC por enquanto")'
+                ).first.click(timeout=5_000)
+            page.wait_for_timeout(800)
+            print("  -> aviso fechado; seguindo para o perfil de acesso.")
+    except Exception:
+        pass
+
     print("Clicando em 'Alterar perfil de acesso'...")
     _abrir_popup_de_perfil(page)
 
