@@ -98,9 +98,20 @@ def test_main_delega_o_fluxo_para_garantir_acesso():
 # ══ 2 · Quem lanca, fecha — num ponto so ════════════════════════════════════
 
 def test_main_fecha_a_sessao_em_qualquer_falha():
-    """Antes, cada caminho de falha decidia por si — e alguns vazavam o Chrome."""
+    """Antes, cada caminho de falha decidia por si — e alguns vazavam o Chrome.
+
+    A conta era EXATA (`== 2`) e envelheceu mal: quando o `except AcessoBloqueado`
+    passou a fechar a sessao tambem — um terceiro caminho de falha fazendo
+    exatamente o que este teste quer —, o teste acusou regressao onde houve
+    conserto. O que importa nao e QUANTOS caminhos existem, e sim que nenhum
+    deles saia sem fechar.
+    """
     fonte = inspect.getsource(login.main)
-    assert fonte.count("encerrar_sessao(p, context)") == 2   # excecao e False
+    saidas_de_falha = fonte.count("return None")
+    fechamentos = fonte.count("encerrar_sessao(p, context)")
+    assert fechamentos >= saidas_de_falha, (
+        f"{saidas_de_falha} saída(s) de falha para {fechamentos} fechamento(s): "
+        "algum caminho vaza o Chrome")
     assert "except BaseException:" in fonte
 
 
