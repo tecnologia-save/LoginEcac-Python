@@ -654,6 +654,83 @@ def _prova_govbr(page, url_antes: str):
     return _reagiu
 
 
+ESPERA_OVERLAY_MS = 10_000      # quanto dar ao overlay modal para sair sozinho
+
+
+def _abrir_popup_de_perfil(page) -> None:
+    """Clica em "Alterar perfil de acesso", contornando o overlay modal.
+
+    O clique era seco: `page.locator("#btnPerfil").first.click()`. Quando o
+    jQuery UI deixa o `div.ui-widget-overlay` na tela, ele intercepta o ponteiro,
+    o Playwright reintenta por 30s e estoura — e uma empresa inteira se perdia
+    por causa de um veu que ia sair sozinho em poucos segundos.
+
+    Foi o que aconteceu em 02/09/2026 com a primeira empresa da execucao: login
+    perfeito, captcha resolvido, redirecionamento concluido, e entao
+
+        TimeoutError: Locator.click: Timeout 30000ms exceeded
+        <div class="ui-widget-overlay"></div> intercepts pointer events
+
+    A escada: esperar o overlay sair; se insistir, Esc (o dialogo do jQuery UI
+    fecha com closeOnEscape); e por fim o clique pelo DOM, que dispara o mesmo
+    `onclick` sem depender de ponteiro. Nao se REMOVE o overlay — apagar o veu de
+    um dialogo que ainda esta aberto so esconderia o problema.
+    """
+    if _esperar_overlay_sair(page):
+        try:
+            page.locator("#btnPerfil").first.click(timeout=10_000)
+            return
+        except Exception as e:
+            print(f"  -> o clique no 'Alterar perfil' nao pegou "
+                  f"({type(e).__name__}); indo pelo DOM.")
+    else:
+        print("  -> o overlay modal nao saiu; abrindo o perfil pelo DOM.")
+
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    # `evaluate` roda no MUNDO ISOLADO do patchright — nao enxerga `$` nem
+    # nenhum global da pagina. Aqui isso nao atrapalha: o que se chama e
+    # `element.click()`, e o DOM E compartilhado. O `onclick` inline do botao
+    # (`$('.erro').hide(); $('#perfilAcesso').dialog(...)`) foi compilado PELA
+    # pagina e roda no contexto dela, com os globais dela.
+    #
+    # E abrir um dialogo local, nao um envio ao portal: nada aqui se parece com
+    # o "Alterar" do formPJ, que e o envio que o eCAC vigia.
+    page.evaluate("() => { const b = document.getElementById('btnPerfil');"
+                  " if (b) b.click(); }")
+
+
+def _esperar_overlay_sair(page, timeout_ms: int = None) -> bool:
+    """True quando nao ha overlay modal cobrindo a tela.
+
+    `None` e le a constante NA CHAMADA, e nao um default no cabecalho: argumento
+    default e ligado na definicao, entao `login.ESPERA_OVERLAY_MS = 1_500` de
+    fora nao teria efeito nenhum — armadilha que ja custou tempo neste arquivo.
+    """
+    timeout_ms = ESPERA_OVERLAY_MS if timeout_ms is None else timeout_ms
+    limite = time.monotonic() + timeout_ms / 1000.0
+    avisou = False
+    while True:
+        try:
+            if not page.locator("div.ui-widget-overlay:visible").count():
+                if avisou:
+                    print("    -> o overlay saiu; seguindo.")
+                return True
+        except Exception:
+            return True              # sem como olhar: nao inventa bloqueio
+        if not avisou:
+            avisou = True
+            print("    -> um overlay modal cobre a tela; esperando ele sair...")
+        if time.monotonic() >= limite:
+            return False
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            return True
+
+
 def _enviar_uma_vez(reacao, clicar, dormir, espera_ms: int = None,
                     passo_ms: int = None) -> str:
     """Deixa o formulario enviado UMA vez. Devolve quem enviou: "pagina" ou "clique".
@@ -1355,7 +1432,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         pass
 
     print("Clicando em 'Alterar perfil de acesso'...")
-    page.locator("#btnPerfil").first.click()
+    _abrir_popup_de_perfil(page)
 
     print("Aguardando popup carregar (formPJ no DOM)...")
     try:
