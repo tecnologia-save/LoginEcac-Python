@@ -69,6 +69,16 @@ SERV.mkdir(exist_ok=True)
     'onclick="validarHcaptcha()"></p></div>'
     '</body></html>', encoding="utf-8")
 
+# Uma tela SAUDAVEL que por acaso tem o link "Retornar para a pagina inicial do
+# e-CAC". O link acompanha as telas de erro, mas e um link comum — e desde que
+# `_erro_do_ecac` roda em TODA empresa, logo depois do goto, um falso positivo
+# aqui custaria uma recarga a mais 1150 vezes.
+(SERV / "com_link_retornar.html").write_text(
+    '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+    '<body><h1>e-CAC</h1><p>Consulta concluída com sucesso.</p>'
+    '<a href="/ecac/Default.aspx">Retornar para a página inicial do e-CAC</a>'
+    '</body></html>', encoding="utf-8")
+
 Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(SERV))
 Handler.log_message = lambda *a, **k: None
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -99,6 +109,13 @@ with sync_playwright() as p:
     page.goto(BASE + "/login.html")
     check("login limpo nao vira 'erro'", _erro_do_ecac(page) == "",
           repr(_erro_do_ecac(page)))
+
+    # So a MENSAGEM decide. O link de retorno sozinho nao pode acusar erro: ele
+    # aparece em tela saudavel tambem, e cada falso positivo e uma recarga
+    # inutil numa empresa que estava indo bem.
+    page.goto(BASE + "/com_link_retornar.html")
+    check("o link 'Retornar...' sozinho NAO acusa erro",
+          _erro_do_ecac(page) == "", repr(_erro_do_ecac(page)))
 
     print()
     print("=== NA TELA DE ERRO NAO HA BOTAO — E ISSO NAO E BUG DE SELETOR ===")

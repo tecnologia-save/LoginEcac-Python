@@ -705,12 +705,14 @@ def _procurar_govbr(page, segundos: float = 15.0):
 # Sao paginas normais do portal — carregam, tem cabecalho, e nao tem botao
 # nenhum de login. Duas empresas foram descartadas por causa delas em menos de
 # um minuto, e a terceira, no mesmo minuto, logou sem problema.
-_MARCAS_DE_ERRO_ECAC = (
+# So a MENSAGEM decide. O link "Retornar para a pagina inicial do e-CAC", que
+# acompanha essas telas, de proposito NAO entra aqui: e um link comum, que pode
+# existir em telas saudaveis, e um falso positivo custaria uma recarga a mais em
+# cada uma das 1150 empresas.
+_MENSAGENS_DE_ERRO_ECAC = (
     "ocorreu um erro",
     "não foi possível validar os seus dados",
     "nao foi possivel validar os seus dados",
-    "retornar para a página inicial do e-cac",
-    "retornar para a pagina inicial do e-cac",
 )
 
 
@@ -720,6 +722,9 @@ def _erro_do_ecac(page) -> str:
     Le o TEXTO, e nao a URL: o portal serve estas telas na mesma URL do eCAC —
     tanto que o passo anterior ja concluia "URL indica eCAC mas dashboard nao
     carregou" sem saber dizer por que.
+
+    Chamada em TODA empresa, logo depois do goto, entao precisa ser barata: e
+    uma leitura so do texto ja carregado, sem espera nenhuma.
     """
     try:
         if page.is_closed():
@@ -727,15 +732,11 @@ def _erro_do_ecac(page) -> str:
         texto = (page.locator("body").inner_text(timeout=3_000) or "")
     except Exception:
         return ""
-    baixo = texto.lower()
-    if not any(m in baixo for m in _MARCAS_DE_ERRO_ECAC):
+    if not any(m in texto.lower() for m in _MENSAGENS_DE_ERRO_ECAC):
         return ""
-    # A frase util e curta e vem logo depois do titulo "e-CAC"; devolver a tela
-    # inteira so encheria o log.
+    # Devolver a tela inteira so encheria o log; a frase util e uma linha.
     for linha in (l.strip() for l in texto.splitlines()):
-        if not linha:
-            continue
-        if any(m in linha.lower() for m in _MARCAS_DE_ERRO_ECAC[:3]):
+        if any(m in linha.lower() for m in _MENSAGENS_DE_ERRO_ECAC):
             return linha[:200]
     return "página de erro do e-CAC"
 
@@ -1286,6 +1287,26 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         return False
 
     page.wait_for_timeout(1_500)
+
+    # Tela de erro do portal: recarregar ANTES de decidir qualquer coisa.
+    #
+    # O lugar importa. Em 03/09/2026 o log dizia "URL indica eCAC mas dashboard
+    # nao carregou" — a URL era do eCAC, ou seja a SESSAO existia; o que nao
+    # havia era pagina, porque o portal tinha servido a tela de erro dele. Tudo
+    # o que vem abaixo (o bloqueio, a sessao ativa, o botao do gov.br) le a tela
+    # para decidir, e nenhuma dessas leituras significa coisa alguma numa tela
+    # de erro. Recarregando aqui, todas passam a ler a pagina de verdade — e a
+    # sessao que voltar e aproveitada em vez de virar um login novo.
+    erro_inicial = _erro_do_ecac(page)
+    if erro_inicial:
+        print(f"  -> o e-CAC devolveu uma pagina de erro: {erro_inicial}")
+        print("  -> recarregando a home antes de seguir...")
+        try:
+            page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
+            page.wait_for_timeout(1_500)
+        except Exception as e:
+            print(f"  -> a recarga nao completou ({type(e).__name__}).")
+
     print("Verificando bloqueio de acesso automatizado...")
     if _acesso_bloqueado(page):
         registrar_erro("Login: acesso bloqueado — pagina exibiu mensagem de acesso automatizado.")
@@ -1319,22 +1340,13 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             # O botao pode faltar por duas razoes muito diferentes, e ate
             # 03/09/2026 as duas saiam com a mesma frase — que mandava procurar
             # problema no seletor quando nao havia nenhum.
+            #
+            # Aqui e so o RELATO: a recarga ja foi tentada logo depois do goto,
+            # e repeti-la custaria outra varredura de 15s para reencontrar a
+            # mesma tela. Quem insiste de verdade e quem chamou — para ele, este
+            # False significa "o portal esta fora, tente esta empresa de novo".
             erro = _erro_do_ecac(page)
             if erro:
-                print(f"  -> o e-CAC respondeu com uma pagina de erro: {erro}")
-                print("  -> recarregando a home do e-CAC e procurando de novo...")
-                try:
-                    page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
-                except Exception:
-                    pass
-                loc_govbr, sel_govbr = _procurar_govbr(page)
-
-        if loc_govbr is None:
-            erro = _erro_do_ecac(page)
-            if erro:
-                # Dizer que e o PORTAL importa: quem le o log precisa saber que
-                # nao ha nada a consertar aqui e que a empresa merece outra
-                # tentativa — o proprio eCAC pede isso ("tente mais tarde").
                 print(f"  -> o e-CAC segue na pagina de erro: {erro}")
                 registrar_erro(f"Login: e-CAC devolveu pagina de erro ({erro}).")
                 return False
