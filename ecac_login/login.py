@@ -428,6 +428,58 @@ ESPERA_ENVIO_ESPONTANEO = 2_500
 PASSO_ENVIO_ESPONTANEO = 250
 
 
+# Checkpoint de "Parar", registrado por quem hospeda a automacao (o `run.py` do
+# Consulta CO). Este pacote nao conhece a janela de progresso — so o gancho.
+#
+# Existe porque as esperas LONGAS deste arquivo eram cegas: `wait_for_url` de 90s
+# e `wait_for(#btnPerfil)` de 60s bloqueiam a thread inteira sem imprimir nem
+# olhar nada. Nesse intervalo o botao "Parar" nao fazia efeito nenhum — dois
+# minutos e meio de "aperta e nao acontece", que foi o relato.
+_GATE = None
+
+
+def registrar_gate(callback) -> None:
+    """Registra (ou desarma, com None) o checkpoint de parada."""
+    global _GATE
+    _GATE = callback
+
+
+def _checkpoint() -> None:
+    """Deixa a parada do usuario valer aqui.
+
+    So fora da thread principal, pela mesma razao do gate do `run.py`: bloquear
+    a principal congelaria a janela que mostra o "Parando...".
+    """
+    if (_GATE is not None
+            and threading.current_thread() is not threading.main_thread()):
+        _GATE()
+
+
+def _esperar_ate(page, condicao, timeout_ms: int, passo_ms: int = 300) -> bool:
+    """Espera `condicao()` virar True, em fatias, obedecendo o "Parar".
+
+    Em fatias, e nao numa espera unica do Playwright, justamente para que o
+    checkpoint tenha onde acontecer. `condicao` que estoura conta como "ainda
+    nao"; guia fechada encerra na hora.
+    """
+    limite = time.monotonic() + timeout_ms / 1000.0
+    while True:
+        try:
+            if page.is_closed():
+                return False
+            if condicao():
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= limite:
+            return False
+        try:
+            page.wait_for_timeout(passo_ms)
+        except Exception:
+            return False
+        _checkpoint()
+
+
 def _pagina_pronta(page, timeout_ms: int = 10_000) -> bool:
     """True quando o documento terminou de carregar.
 
@@ -622,6 +674,70 @@ def _achar_govbr(page, timeout_ms: int = 1_000):
         except Exception:
             continue
     return None, ""
+
+
+def _procurar_govbr(page, segundos: float = 15.0):
+    """`_achar_govbr` insistindo por ate `segundos`. (locator, seletor) ou (None, "").
+
+    Em fatias, e nao num timeout unico, porque assim a espera obedece ao botao
+    "Parar" e porque o botao costuma aparecer no primeiro instante — quem
+    espera de verdade e a excecao.
+    """
+    limite = time.monotonic() + segundos
+    loc, sel = _achar_govbr(page)
+    while loc is None and time.monotonic() < limite:
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            break
+        _checkpoint()
+        loc, sel = _achar_govbr(page)
+    return loc, sel
+
+
+# Telas de erro do proprio eCAC, colhidas em producao (03/09/2026):
+#
+#   "Ocorreu um erro. (Código: 0)  Erro desconhecido."
+#   "Atenção. (Código: 10000 - 380D07CF)  Prezado Usuário, não foi possível
+#    validar os seus dados nas bases cadastrais da Receita Federal. Por favor,
+#    tente mais tarde."
+#
+# Sao paginas normais do portal — carregam, tem cabecalho, e nao tem botao
+# nenhum de login. Duas empresas foram descartadas por causa delas em menos de
+# um minuto, e a terceira, no mesmo minuto, logou sem problema.
+_MARCAS_DE_ERRO_ECAC = (
+    "ocorreu um erro",
+    "não foi possível validar os seus dados",
+    "nao foi possivel validar os seus dados",
+    "retornar para a página inicial do e-cac",
+    "retornar para a pagina inicial do e-cac",
+)
+
+
+def _erro_do_ecac(page) -> str:
+    """A frase de erro que o eCAC pos na tela, ou "" se a tela nao e de erro.
+
+    Le o TEXTO, e nao a URL: o portal serve estas telas na mesma URL do eCAC —
+    tanto que o passo anterior ja concluia "URL indica eCAC mas dashboard nao
+    carregou" sem saber dizer por que.
+    """
+    try:
+        if page.is_closed():
+            return ""
+        texto = (page.locator("body").inner_text(timeout=3_000) or "")
+    except Exception:
+        return ""
+    baixo = texto.lower()
+    if not any(m in baixo for m in _MARCAS_DE_ERRO_ECAC):
+        return ""
+    # A frase util e curta e vem logo depois do titulo "e-CAC"; devolver a tela
+    # inteira so encheria o log.
+    for linha in (l.strip() for l in texto.splitlines()):
+        if not linha:
+            continue
+        if any(m in linha.lower() for m in _MARCAS_DE_ERRO_ECAC[:3]):
+            return linha[:200]
+    return "página de erro do e-CAC"
 
 
 def _prova_govbr(page, url_antes: str):
@@ -1198,15 +1314,30 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             pass
 
         print("Clicando em 'Entrar com gov.br'...")
-        limite_busca = time.monotonic() + 15.0
-        loc_govbr, sel_govbr = _achar_govbr(page)
-        while loc_govbr is None and time.monotonic() < limite_busca:
-            try:
-                page.wait_for_timeout(300)
-            except Exception:
-                break
-            loc_govbr, sel_govbr = _achar_govbr(page)
+        loc_govbr, sel_govbr = _procurar_govbr(page)
         if loc_govbr is None:
+            # O botao pode faltar por duas razoes muito diferentes, e ate
+            # 03/09/2026 as duas saiam com a mesma frase — que mandava procurar
+            # problema no seletor quando nao havia nenhum.
+            erro = _erro_do_ecac(page)
+            if erro:
+                print(f"  -> o e-CAC respondeu com uma pagina de erro: {erro}")
+                print("  -> recarregando a home do e-CAC e procurando de novo...")
+                try:
+                    page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
+                except Exception:
+                    pass
+                loc_govbr, sel_govbr = _procurar_govbr(page)
+
+        if loc_govbr is None:
+            erro = _erro_do_ecac(page)
+            if erro:
+                # Dizer que e o PORTAL importa: quem le o log precisa saber que
+                # nao ha nada a consertar aqui e que a empresa merece outra
+                # tentativa — o proprio eCAC pede isso ("tente mais tarde").
+                print(f"  -> o e-CAC segue na pagina de erro: {erro}")
+                registrar_erro(f"Login: e-CAC devolveu pagina de erro ({erro}).")
+                return False
             print("  -> botao 'Entrar com gov.br' nao encontrado.")
             registrar_erro("Login: botao 'Entrar com gov.br' nao encontrado.")
             return False
@@ -1389,15 +1520,13 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         print("  -> captcha tratado; navegacao seguiu.")
 
         print("Aguardando redirecionamento final para cav.receita.fazenda.gov.br/ecac (ate 90s)...")
-        try:
-            page.wait_for_url(
-                lambda u: "cav.receita.fazenda.gov.br/ecac" in u and "autenticacao" not in u,
-                timeout=90_000,
-            )
+        # Em fatias, nao num `wait_for_url` de 90s: aquela espera bloqueia a
+        # thread inteira e o botao "Parar" fica sem efeito o tempo todo.
+        if _esperar_ate(page, _ja_logado, 90_000):
             print("  -> redirecionamento final concluido.")
-        except Exception as e:
+        else:
             registrar_erro("Login: redirecionamento final para o eCAC nao ocorreu.")
-            print(f"  -> nao chegou no eCAC: {type(e).__name__}")
+            print("  -> nao chegou no eCAC no tempo esperado.")
             try:
                 shot = str(project_dir / "_debug_pos_cert.png")
                 page.screenshot(path=shot, full_page=True)
@@ -1407,11 +1536,12 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             return False
 
     print("Aguardando dashboard do eCAC carregar (#btnPerfil, ate 60s)...")
-    try:
-        page.locator("#btnPerfil").first.wait_for(state="visible", timeout=60_000)
-    except Exception as e:
+    # Idem: fatiado para o "Parar" ter onde acontecer.
+    if not _esperar_ate(page,
+                        lambda: page.locator("#btnPerfil").first.is_visible(),
+                        60_000):
         registrar_erro("Login: dashboard do eCAC nao carregou (#btnPerfil ausente).")
-        print(f"  -> erro aguardando dashboard: {type(e).__name__}")
+        print("  -> o dashboard nao apareceu no tempo esperado.")
         try:
             shot = str(project_dir / "_debug_dashboard.png")
             page.screenshot(path=shot, full_page=True)
