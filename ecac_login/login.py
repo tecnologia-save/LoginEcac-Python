@@ -380,11 +380,13 @@ def _montar_launch_kwargs(user_data_dir: str, *,
 # vezes as 3 tentativas daqui. Foi assim que uma etapa de captcha comeu minutos
 # no log de 28/08, com ReadTimeout em modelo apos modelo.
 #
-# 90s vem da aritmetica do solver: GEMINI_TIMEOUT_MS e 20s e a bancada tem 3
-# modelos, entao uma cadeia cheia custa 60s; sobra espaco para uma rodada de
-# screenshot, clique e verificacao. Com as 3 tentativas daqui, a etapa inteira
-# passa a custar no maximo ~4,5 minutos em vez de ilimitado.
-ORCAMENTO_CAPTCHA_S = 90.0
+# 120s vem da aritmetica do solver: GEMINI_TIMEOUT_MS e 25s e a bancada tem 3
+# modelos, entao uma cadeia cheia custa ~75s; sobra espaco para o screenshot,
+# clique e verificacao. Subiu de 90s para dar FOLGA em MAQUINAS/REDES LENTAS,
+# onde o proprio carregamento dos tiles ja consumia o orcamento antes da 1a
+# chamada ao Gemini (visto em log com 'orçamento de tempo esgotado' na rodada 1).
+# Com as 3 tentativas daqui, a etapa inteira custa no maximo ~6 min, nao ilimitado.
+ORCAMENTO_CAPTCHA_S = 120.0
 
 
 def _try_solve_captcha(page, etapa: str, max_attempts: int = 3, metrics_fn=None) -> bool:
@@ -1459,8 +1461,26 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                     registrar_erro("Login: numero maximo de dispositivos conectados atingido.")
                     print("  -> [DISPOSITIVOS] a tela do limite substituiu a do certificado.")
                     raise DispositivosMaximo()
+                # Botao nao apareceu — pagina do gov.br lenta / captcha ainda
+                # assentando (visto em maquina lenta: a MESMA conta logava noutra).
+                # Em vez de abortar de primeira, espera e PROCURA de novo (o proximo
+                # _clicar_certificado reespera ~20s). NAO recarrega: um reload aqui
+                # pode descartar o estado do OAuth do gov.br e transformar um
+                # transitorio (botao a um instante de renderizar) em falha certa.
+                if tentativa_cert < MAX_TENTATIVAS_CERT:
+                    print("  -> botao do certificado nao apareceu; aguardando e "
+                          "procurando de novo...")
+                    try:
+                        page.wait_for_timeout(3_000)
+                    except Exception:
+                        # pagina caiu de verdade -> aborta com elegancia (como antes)
+                        registrar_erro("Login: botao 'Seu certificado digital' nao "
+                                       "encontrado (pagina indisponivel).")
+                        print("[cert] Pagina indisponivel ao reesperar. Abortando.")
+                        return False
+                    continue
                 registrar_erro("Login: botao 'Seu certificado digital' nao encontrado.")
-                print("[cert] Botao nao encontrado. Abortando.")
+                print("[cert] Botao nao encontrado apos todas as tentativas. Abortando.")
                 return False
 
             # Fallback: se a policy do registro nao funcionou, pywinauto seleciona
@@ -1635,18 +1655,53 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     except Exception:
         print("  -> input nao ficou visivel; vai tentar fallback via JS.")
 
+    def _valor_nipapel() -> str:
+        try:
+            return page.evaluate(
+                "() => { const i = document.getElementById('txtNIPapel2');"
+                " return i ? (i.value || '') : ''; }") or ""
+        except Exception:
+            return ""
+
+    def _garantir_cnpj_preenchido() -> bool:
+        """Preenche o CNPJ em #txtNIPapel2 e CONFIRMA que o valor colou.
+        O eCAC as vezes recusa com 'CNPJ nao preenchido' quando o valor nao
+        registrou no form antes do envio (race). O fill() do Playwright ja dispara
+        input; aqui RELEMOS e, SO se nao colou, forcamos via JS (value + input +
+        change). Sem 'blur' de proposito: a validacao/onblur do form nao deve ser
+        acionada antes de validaCaptcha ficar pronta. A conferencia compara SO OS
+        DIGITOS (o campo pode aplicar mascara CNPJ)."""
+        alvo = "".join(ch for ch in cnpj if ch.isdigit()) or cnpj
+
+        def _colou() -> bool:
+            v = _valor_nipapel()
+            if alvo:
+                return "".join(ch for ch in v if ch.isdigit()) == alvo
+            return bool(v.strip())
+
+        try:
+            nip_input.fill(cnpj)
+        except Exception:
+            pass
+        if _colou():
+            return True
+        try:
+            page.evaluate(
+                "(v) => { const i = document.getElementById('txtNIPapel2');"
+                " if (i) { i.value = v;"
+                " i.dispatchEvent(new Event('input', {bubbles:true}));"
+                " i.dispatchEvent(new Event('change', {bubbles:true})); } }",
+                cnpj,
+            )
+        except Exception:
+            pass
+        ok = _colou()
+        if not ok:
+            print("  -> [AVISO] CNPJ nao confirmou no campo apos preencher.")
+        return ok
+
     print("Preenchendo identificador do perfil PJ em #txtNIPapel2...")
-    try:
-        nip_input.fill(cnpj)
-    except Exception:
-        print("  -> fill falhou, injetando via JS...")
-        page.evaluate(
-            "(v) => { const i = document.getElementById('txtNIPapel2');"
-            " if (i) { i.value = v;"
-            " i.dispatchEvent(new Event('input', {bubbles:true}));"
-            " i.dispatchEvent(new Event('change', {bubbles:true})); } }",
-            cnpj,
-        )
+    _garantir_cnpj_preenchido()
 
     page.wait_for_timeout(500)
 
@@ -1847,6 +1902,32 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         estado, erro = _desfecho()
 
         if estado == "erro":
+            # Recusa por CAMPO VAZIO ('CNPJ nao preenchido') = race do preenchimento
+            # (o valor nao registrou no form antes do envio), NAO e fatal:
+            # repreenche o CNPJ e reenvia. Demais recusas (procuracao, CNPJ
+            # invalido, acesso automatizado) seguem fatais como antes.
+            _msg_low = (erro or "").lower()
+            _campo_vazio = ("cnpj" in _msg_low
+                            and ("não preenchido" in _msg_low or "nao preenchido" in _msg_low))
+            if _campo_vazio and tentativa_alterar < MAX_ENVIOS_ALTERAR:
+                print(f"  -> [RETRIAVEL | via={via}] {erro} — repreenchendo o CNPJ e reenviando...")
+                # Limpa a recusa velha ANTES de reenviar: senao _reacao_da_tela /
+                # _desfecho leem a .mensagemErro anterior, _enviar_uma_vez conclui
+                # "a pagina ja reagiu" e NAO clica — o reenvio viraria no-op.
+                # So a faixa DO CNPJ e limpa: um erro fatal concorrente (procuracao,
+                # acesso automatizado) fica visivel e continua sendo respeitado.
+                try:
+                    page.evaluate(
+                        "() => document.querySelectorAll('.mensagemErro').forEach(e => {"
+                        " const t = (e.textContent || '').toLowerCase();"
+                        " if (t.includes('cnpj') && (t.includes('não preenchido')"
+                        " || t.includes('nao preenchido')))"
+                        " { e.textContent = ''; e.style.display = 'none'; } })")
+                except Exception:
+                    pass
+                _garantir_cnpj_preenchido()
+                page.wait_for_timeout(600)
+                continue
             registrar_erro(erro)
             # O `via=` sai junto com a recusa de proposito: e o par
             # (quem enviou, o que o portal respondeu) que confirma ou derruba a
