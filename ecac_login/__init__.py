@@ -5,6 +5,8 @@ from .login import (
     PortalIndisponivel,
     registrar_gate,
     abrir_browser_com_certificado,
+    dir_perfil_chrome,
+    disco_local_confiavel,
     encerrar_sessao,
     garantir_acesso_ecac,
     tentou_trocar_perfil,
@@ -18,6 +20,7 @@ from .login import main as fazer_login
 __all__ = ["AcessoBloqueado", "DispositivosMaximo", "LoginCancelado",
            "PortalIndisponivel",
            "abrir_browser_com_certificado",
+           "dir_perfil_chrome", "disco_local_confiavel",
            "encerrar_sessao", "fazer_login", "garantir_acesso_ecac",
            "ultima_recusa_de_perfil", "registrar_gate",
            "tentou_trocar_perfil"]

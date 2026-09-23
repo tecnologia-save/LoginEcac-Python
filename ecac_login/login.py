@@ -9,6 +9,7 @@ Pre-requisitos no .env do projeto chamador:
     CERT_PFX_PASSPHRASE=senha-do-pfx    (opcional: lida automaticamente do senhas.json)
     GEMINI_API_KEY=chave-gemini
 """
+import hashlib
 import json
 import os
 import re
@@ -253,6 +254,84 @@ CERT_ORIGINS = [
     "https://receitafederal.gov.br",
     "https://www.receitafederal.gov.br",
 ]
+
+
+# ── Onde mora o perfil do Chrome ─────────────────────────────────────────────
+# O perfil (user-data-dir) recebe escrita CONTINUA do Chrome: SQLite em modo WAL
+# (cookies, historico), LevelDB, cache em disco e travas de arquivo. Num disco que
+# NAO e local de verdade isso TRAVA o navegador — cliques parados em "scrolling
+# into view", a pagina deixa de responder e o Chrome acaba caindo
+# (TargetClosedError) depois de alguns documentos. E exatamente o que acontece
+# quando o operador roda o .exe de DENTRO do Google Drive, porque o perfil nasce
+# ao lado do .exe.
+#
+# Pegadinha medida: o Google Drive para desktop (G:, H:, ...) se apresenta ao
+# Windows como disco FIXO — so que FAT32 e com a flag de armazenamento remoto.
+# Por isso a checagem nao pode ser so "e disco fixo?": exige NTFS/ReFS e ausencia
+# da flag. Qualquer outra coisa (Drive, rede, pen drive) leva o perfil para
+# %LOCALAPPDATA%. O nome da pasta final continua `chrome_debug_profile` — ha
+# automacoes que localizam o Chrome pela linha de comando com esse nome.
+_DRIVE_FIXED = 3
+_FILE_SUPPORTS_REMOTE_STORAGE = 0x100
+_SISTEMAS_ARQUIVO_LOCAIS = {"NTFS", "REFS"}
+
+
+def disco_local_confiavel(caminho) -> bool:
+    """True se `caminho` esta num disco LOCAL de verdade: fixo, NTFS/ReFS e sem a
+    flag de armazenamento remoto. False para Google Drive, rede, pen drive — e
+    tambem quando nao da para saber (na duvida, o perfil vai para o disco local)."""
+    try:
+        import ctypes
+        raiz = os.path.splitdrive(os.path.abspath(str(caminho)))[0]
+        if not raiz or raiz.startswith("\\\\"):
+            return False  # caminho UNC (\servidor\...) = rede
+        raiz += "\\"
+        k32 = ctypes.windll.kernel32
+        if k32.GetDriveTypeW(raiz) != _DRIVE_FIXED:
+            return False
+        fs = ctypes.create_unicode_buffer(261)
+        flags = ctypes.c_ulong()
+        if not k32.GetVolumeInformationW(raiz, None, 0, None, None,
+                                         ctypes.byref(flags), fs, 261):
+            return False
+        if fs.value.upper() not in _SISTEMAS_ARQUIVO_LOCAIS:
+            return False
+        return not (flags.value & _FILE_SUPPORTS_REMOTE_STORAGE)
+    except Exception:
+        return False
+
+
+def dir_perfil_chrome(project_dir, perfil_dir=None) -> Path:
+    """Pasta do perfil do Chrome para `project_dir`.
+
+    Ordem: `perfil_dir` explicito > `ECAC_PERFIL_DIR` do ambiente/.env >
+    `<project_dir>/chrome_debug_profile` quando o projeto esta num disco local
+    confiavel > `%LOCALAPPDATA%/SaveEcac/perfis/<projeto>-<hash>/chrome_debug_profile`.
+    O hash do caminho separa dois projetos de mesmo nome. Funcao PURA quanto ao
+    filesystem (nao cria nada)."""
+    if perfil_dir:
+        return Path(perfil_dir)
+    do_ambiente = os.getenv("ECAC_PERFIL_DIR", "").strip()
+    if do_ambiente:
+        return Path(do_ambiente)
+    project_dir = Path(project_dir)
+    if disco_local_confiavel(project_dir):
+        return project_dir / "chrome_debug_profile"
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    absoluto = os.path.abspath(str(project_dir))
+    chave = hashlib.sha1(absoluto.lower().encode("utf-8")).hexdigest()[:10]
+    nome = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(absoluto).name).strip("_")[:40] or "projeto"
+    return Path(base) / "SaveEcac" / "perfis" / f"{nome}-{chave}" / "chrome_debug_profile"
+
+
+def _avisar_perfil_realocado(project_dir, perfil) -> None:
+    """Uma linha no log quando o perfil NAO fica ao lado do projeto. Sem o caminho:
+    ele traz o nome do usuario do Windows e a regra do modulo e nao imprimi-lo."""
+    if Path(perfil) != Path(project_dir) / "chrome_debug_profile":
+        print("[perfil] Projeto fora de um disco local (Google Drive, rede ou pen drive) "
+              "ou pasta definida por ECAC_PERFIL_DIR: o perfil do Chrome fica na pasta "
+              "local do usuario (%LOCALAPPDATA%/SaveEcac/perfis), para o navegador "
+              "nao travar.")
 
 
 def _configurar_download(user_data_dir: str) -> None:
@@ -999,7 +1078,7 @@ def _clicar_ate_reagir(page, localizar, seletor_css, prova, descricao: str,
     return False
 
 
-def abrir_browser_com_certificado(project_dir: Path | str = None):
+def abrir_browser_com_certificado(project_dir: Path | str = None, perfil_dir=None):
     """Abre o Chrome com o certificado digital configurado e retorna (p, context, page).
 
     Não faz login no eCAC — apenas abre o navegador com os client_certificates
@@ -1007,6 +1086,8 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
 
     Args:
         project_dir: Diretório do projeto chamador. Usado para o perfil Chrome e .env.
+        perfil_dir: Pasta do perfil do Chrome. Padrão: ver `dir_perfil_chrome`
+                    (fora do projeto quando ele não está num disco local).
 
     Returns:
         Tupla (p, context, page) — navegador aberto, sem navegação inicial.
@@ -1017,7 +1098,8 @@ def abrir_browser_com_certificado(project_dir: Path | str = None):
 
     load_dotenv(dotenv_path=project_dir / ".env", override=True)
 
-    user_data_dir = str(project_dir / "chrome_debug_profile")
+    user_data_dir = str(dir_perfil_chrome(project_dir, perfil_dir))
+    _avisar_perfil_realocado(project_dir, user_data_dir)
     os.makedirs(user_data_dir, exist_ok=True)
 
     _configurar_download(user_data_dir)
@@ -1039,7 +1121,8 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
          cert_pfx_path: str | None = None,
          cert_pfx_passphrase: str | None = None,
          cert_subject_cn: str | None = None,
-         cancelado=None):
+         cancelado=None,
+         perfil_dir=None):
     """Realiza o login no eCAC e retorna (playwright, context, page) autenticados.
 
     Duas formas de apresentar o certificado, mutuamente exclusivas — ver
@@ -1071,6 +1154,9 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
                    quer abortar. Consultado ANTES de cada abertura de navegador
                    e durante a espera entre elas; quando devolve True, a sessao
                    e fechada e sobe `LoginCancelado`. Sem ele, nada muda.
+        perfil_dir: Pasta do perfil do Chrome. Padrao: ver `dir_perfil_chrome` —
+                    ao lado do projeto num disco local; em %LOCALAPPDATA% quando
+                    o projeto esta no Google Drive/rede (la o Chrome trava).
 
     Returns:
         Tupla (p, context, page) em caso de sucesso, ou None em caso de falha.
@@ -1081,7 +1167,8 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
 
     load_dotenv(dotenv_path=project_dir / ".env", override=True)
 
-    user_data_dir = str(project_dir / "chrome_debug_profile")
+    user_data_dir = str(dir_perfil_chrome(project_dir, perfil_dir))
+    _avisar_perfil_realocado(project_dir, user_data_dir)
     os.makedirs(user_data_dir, exist_ok=True)
 
     _configurar_download(user_data_dir)

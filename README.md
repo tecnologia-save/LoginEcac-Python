@@ -155,6 +155,18 @@ else:
 | `cnpj` | `str` | Sim | CNPJ da empresa (14 dígitos, sem formatação) |
 | `project_dir` | `Path \| str` | Não | Diretório do projeto — onde está o `.env` e onde serão salvos o perfil do Chrome e logs. Padrão: diretório de trabalho atual |
 | `metrics` | `MetricasManager` | Não | Instância do gerenciador de métricas para registrar dados de captcha e login |
+| `perfil_dir` | `Path \| str` | Não | Pasta do perfil do Chrome. Padrão: `dir_perfil_chrome(project_dir)` — veja abaixo |
+
+**Onde fica o perfil do Chrome (`dir_perfil_chrome`).** Ao lado do projeto
+(`<project_dir>/chrome_debug_profile`) **só quando o projeto está num disco local de
+verdade** (fixo, NTFS/ReFS, sem armazenamento remoto). Fora disso — Google Drive, rede, pen
+drive — o perfil vai para `%LOCALAPPDATA%\SaveEcac\perfis\<projeto>-<hash>\chrome_debug_profile`:
+o Chrome escreve no perfil sem parar (SQLite/LevelDB/cache) e, num disco virtual, **trava e
+cai** depois de alguns minutos. Atenção: o Google Drive para desktop se apresenta ao Windows
+como disco **fixo** (FAT32, com a flag de armazenamento remoto) — por isso a checagem não é
+só "é disco fixo?" (`disco_local_confiavel`). A variável `ECAC_PERFIL_DIR` força outra pasta.
+O nome final da pasta continua `chrome_debug_profile` (há automações que localizam o Chrome
+pela linha de comando com esse nome).
 
 ### Retorno de `fazer_login()`
 
