@@ -536,6 +536,11 @@ def _checkpoint() -> None:
         _GATE()
 
 
+# Teto da espera pelo botao "Seu certificado digital" (ou pelo login ja feito).
+# Mesmo total da espera antiga: 20s no 1o seletor + 2s em cada um dos outros.
+ESPERA_BOTAO_CERTIFICADO_MS = 26_000
+
+
 def _esperar_ate(page, condicao, timeout_ms: int, passo_ms: int = 300) -> bool:
     """Espera `condicao()` virar True, em fatias, obedecendo o "Parar".
 
@@ -1504,17 +1509,43 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         "text=Seu certificado digital",
     ]
 
+    def _botao_certificado():
+        """(seletor, locator) do primeiro botao de certificado VISIVEL, ou None."""
+        for sel in cert_selectors:
+            loc = page.locator(sel).first
+            if loc.is_visible():
+                return sel, loc
+        return None
+
     def _clicar_certificado() -> bool:
+        """Espera o botao OU o login ja feito — o que vier primeiro.
+
+        O gov.br as vezes reaproveita a sessao e, depois do captcha, redireciona
+        direto para o eCAC: a tela do certificado nunca vem. Esperar so pelo
+        botao custava ~22s ate desistir para entao perceber o login (execucao
+        real de 09/10/2026, 15:58). O teto e o mesmo de antes (20s no primeiro
+        seletor + 2s em cada um dos outros).
+        """
         print("Procurando botao 'Seu certificado digital'...")
-        for i, sel in enumerate(cert_selectors):
-            try:
-                loc = page.locator(sel).first
-                loc.wait_for(state="visible", timeout=20_000 if i == 0 else 2_000)
-                print(f"  -> match com: {sel}")
-                loc.click()
+        achado = []
+
+        def _pronto() -> bool:
+            if _ja_logado() or page.locator("#btnPerfil").first.is_visible():
                 return True
-            except Exception:
-                continue
+            botao = _botao_certificado()
+            if botao:
+                achado.append(botao)
+            return bool(botao)
+
+        if _esperar_ate(page, _pronto, ESPERA_BOTAO_CERTIFICADO_MS) and achado:
+            sel, loc = achado[-1]
+            print(f"  -> match com: {sel}")
+            loc.click()
+            return True
+        if not achado and (_ja_logado() or _dashboard_na_tela(timeout_ms=500)):
+            print("  -> a pagina ja foi para o eCAC (sessao do gov.br reaproveitada); "
+                  "nao ha botao de certificado a clicar.")
+            return False
         print("  -> botao 'Seu certificado digital' nao encontrado.")
         return False
 

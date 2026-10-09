@@ -95,6 +95,8 @@ def ate_o_certificado(monkeypatch):
     monkeypatch.setattr(login, "_prova_govbr", lambda *a, **k: (lambda: True))
     monkeypatch.setattr(login, "_clicar_ate_reagir", lambda *a, **k: True)
     monkeypatch.setattr(login, "_try_solve_captcha", lambda *a, **k: True)
+    # Sem botão nenhum na página, a espera por ele iria até o teto real.
+    monkeypatch.setattr(login, "ESPERA_BOTAO_CERTIFICADO_MS", 0)
 
 
 PAGINA_DO_LIMITE = (
