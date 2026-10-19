@@ -508,6 +508,89 @@ PASSO_PROVA_MS = 250
 ESPERA_ENVIO_ESPONTANEO = 2_500
 PASSO_ENVIO_ESPONTANEO = 250
 
+# "Acesso automatizado" NA TROCA DE PERFIL — o <p class="mensagemErro"> "Nao foi
+# possivel alterar o perfil de acesso. A execucao possui atributos que
+# caracteriza acesso automatizado. Tente novamente mais tarde".
+#
+# Nao e o BLOQUEIO do gov.br na tela de login (`MENSAGEM_ACESSO_BLOQUEADO`), que
+# condena a janela: aqui a sessao continua autenticada, e a propria mensagem pede
+# outra tentativa. Era tratado como recusa fatal — o popup fechava, `main`
+# fechava o navegador e quem chamou abria outro, com login e captcha novos
+# (relato do operador, 19/10/2026). Agora: espera e reenvia NA MESMA janela.
+#
+# Com teto, de proposito: um bloqueio que nao passa viraria um laco sem fim com
+# o navegador aberto. 30 x 10s, ~5 a 7 min por empresa; quem chama pode mudar
+# por chamada (`garantir_acesso_ecac(..., insistencias_acesso_automatizado=)`).
+ESPERA_ACESSO_AUTOMATIZADO_NA_TROCA_S = 10
+INSISTENCIAS_ACESSO_AUTOMATIZADO_NA_TROCA = 30
+# Reenvios para o que NAO e "acesso automatizado": a tela que nao reagiu ao
+# envio, e o "CNPJ nao preenchido" (race do preenchimento). Um, como sempre foi.
+REENVIOS_SEM_RESPOSTA = 1
+
+
+def _eh_acesso_automatizado(mensagem: str) -> bool:
+    return "acesso automatizado" in (mensagem or "").lower()
+
+
+def _eh_cnpj_nao_preenchido(mensagem: str) -> bool:
+    texto = (mensagem or "").lower()
+    return "cnpj" in texto and ("não preenchido" in texto or "nao preenchido" in texto)
+
+
+def _enviar_ate_o_desfecho(enviar, desfecho, preparar_reenvio, esperar_s, *,
+                           insistencias: int, reenvios: int = None):
+    """Envia o formPJ ate o eCAC responder de vez. Devolve `(estado, mensagem, via)`.
+
+    `estado`: "ok" (trocou), "erro" (recusa; `mensagem` e o texto do portal) ou
+    "timeout" (a tela nao respondeu). A politica:
+
+    - "acesso automatizado": espera `ESPERA_ACESSO_AUTOMATIZADO_NA_TROCA_S` e
+      reenvia, ate `insistencias` vezes, NA MESMA janela;
+    - "CNPJ nao preenchido" e tela que nao reagiu: `reenvios` reenvio(s);
+    - toda outra recusa (procuracao, CNPJ invalido) encerra na hora — nenhuma
+      muda de resposta com outra tentativa.
+
+    Cada envio continua sendo UM so: quem envia e `enviar()`, que deixa a propria
+    pagina enviar e so clica se ela nao enviar (`_enviar_uma_vez`).
+
+    `enviar()` devolve a via; `desfecho()` devolve `(estado, mensagem)`;
+    `preparar_reenvio(motivo)` limpa a recusa da tela e repreenche o CNPJ;
+    `esperar_s(segundos)` espera. Parametros para que a POLITICA seja testada sem
+    navegador.
+    """
+    reenvios = REENVIOS_SEM_RESPOSTA if reenvios is None else reenvios
+    insistidas = 0
+    reenviados = 0
+    while True:
+        via = enviar()
+        estado, erro = desfecho()
+        if estado == "ok":
+            return "ok", "", via
+        if estado == "erro" and _eh_acesso_automatizado(erro):
+            if insistidas >= insistencias:
+                return "erro", erro, via
+            insistidas += 1
+            print(f"  -> [ACESSO AUTOMATIZADO | via={via}] o eCAC pediu para tentar mais "
+                  f"tarde ({insistidas}/{insistencias}). Esperando "
+                  f"{ESPERA_ACESSO_AUTOMATIZADO_NA_TROCA_S}s e reenviando NA MESMA janela...")
+            esperar_s(ESPERA_ACESSO_AUTOMATIZADO_NA_TROCA_S)
+            preparar_reenvio("acesso_automatizado")
+            continue
+        if estado == "erro" and not _eh_cnpj_nao_preenchido(erro):
+            return "erro", erro, via
+        if reenviados >= reenvios:
+            return estado, erro, via
+        reenviados += 1
+        if estado == "erro":
+            print(f"  -> [RETRIAVEL | via={via}] {erro} — repreenchendo o CNPJ e reenviando...")
+            preparar_reenvio("cnpj_nao_preenchido")
+        else:
+            # Repreenche tambem: se a pagina esvaziou o campo e nao respondeu,
+            # sem o CNPJ de volta nem ela nem o clique teriam o que enviar.
+            print("  -> a tela nao reagiu ao 'Alterar'; um segundo envio, agora "
+                  "bem separado do primeiro.")
+            preparar_reenvio("sem_resposta")
+
 
 # Checkpoint de "Parar", registrado por quem hospeda a automacao (o `run.py` do
 # Consulta CO). Este pacote nao conhece a janela de progresso — so o gancho.
@@ -1311,7 +1394,8 @@ def _acesso_bloqueado(page) -> bool:
 
 
 def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
-                         policy_ok: bool = True, cert_serial: str = "") -> bool:
+                         policy_ok: bool = True, cert_serial: str = "",
+                         insistencias_acesso_automatizado: int | None = None) -> bool:
     """Garante eCAC autenticado com o perfil PJ do CNPJ, numa sessao EXISTENTE.
 
     Nao lanca navegador, nao cria contexto e NAO FECHA NADA: a sessao pertence a
@@ -1325,7 +1409,14 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     True quando o eCAC esta autenticado e o perfil ativo e o CNPJ pedido.
     False quando nao foi possivel garantir isso. `AcessoBloqueado` continua
     subindo para quem decide reiniciar.
+
+    `insistencias_acesso_automatizado`: quantas vezes esperar e reenviar quando a
+    troca e recusada como "acesso automatizado" (padrao:
+    `INSISTENCIAS_ACESSO_AUTOMATIZADO_NA_TROCA`; 0 devolve False na primeira,
+    como antes).
     """
+    if insistencias_acesso_automatizado is None:
+        insistencias_acesso_automatizado = INSISTENCIAS_ACESSO_AUTOMATIZADO_NA_TROCA
 
     _ULTIMA_RECUSA["mensagem"] = ""
     _CHEGOU_NA_TROCA["sim"] = False
@@ -1734,44 +1825,56 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     except Exception:
         pass
 
-    print("Clicando em 'Alterar perfil de acesso'...")
-    _abrir_popup_de_perfil(page)
+    def _abrir_formulario() -> bool:
+        """O popup "Alterar perfil de acesso" aberto, na aba PJ, com o campo do
+        CNPJ na tela. False quando o formPJ nao aparece. Chamado de novo no
+        reenvio do "acesso automatizado" se o eCAC tiver fechado o popup."""
+        print("Clicando em 'Alterar perfil de acesso'...")
+        _abrir_popup_de_perfil(page)
 
-    print("Aguardando popup carregar (formPJ no DOM)...")
-    try:
-        page.locator("#formPJ").first.wait_for(state="attached", timeout=15_000)
-    except Exception:
-        print("  -> #formPJ nao aparece. Abortando.")
-        return False
-
-    print("Ativando aba 'Pessoa Juridica'...")
-    pj_tab_selectors = [
-        "[onclick*='formPJ']",
-        "[href='#formPJ']",
-        "a:has-text('Procurador de pessoa jur')",
-        "a:has-text('Pessoa Jur')",
-        "label:has-text('Jur')",
-    ]
-    tab_clicked = False
-    for sel in pj_tab_selectors:
+        print("Aguardando popup carregar (formPJ no DOM)...")
         try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=1_500):
-                loc.click()
-                print(f"  -> aba ativada via: {sel}")
-                tab_clicked = True
-                break
+            page.locator("#formPJ").first.wait_for(state="attached", timeout=15_000)
         except Exception:
-            continue
-    if not tab_clicked:
-        print("  -> nenhum seletor de aba bateu (talvez ja esteja ativa).")
+            print("  -> #formPJ nao aparece. Abortando.")
+            return False
 
-    print("Aguardando #txtNIPapel2 ficar visivel...")
+        print("Ativando aba 'Pessoa Juridica'...")
+        pj_tab_selectors = [
+            "[onclick*='formPJ']",
+            "[href='#formPJ']",
+            "a:has-text('Procurador de pessoa jur')",
+            "a:has-text('Pessoa Jur')",
+            "label:has-text('Jur')",
+        ]
+        tab_clicked = False
+        for sel in pj_tab_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=1_500):
+                    loc.click()
+                    print(f"  -> aba ativada via: {sel}")
+                    tab_clicked = True
+                    break
+            except Exception:
+                continue
+        if not tab_clicked:
+            print("  -> nenhum seletor de aba bateu (talvez ja esteja ativa).")
+
+        print("Aguardando #txtNIPapel2 ficar visivel...")
+        try:
+            page.locator("#txtNIPapel2").first.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            print("  -> input nao ficou visivel; vai tentar fallback via JS.")
+        return True
+
+    if not _abrir_formulario():
+        return False
     nip_input = page.locator("#txtNIPapel2").first
-    try:
-        nip_input.wait_for(state="visible", timeout=10_000)
-    except Exception:
-        print("  -> input nao ficou visivel; vai tentar fallback via JS.")
+
+    # O CNPJ confirmou no campo? So entao "campo vazio" pode querer dizer que a
+    # PAGINA o consumiu (ver `_formulario_em_envio`).
+    _FORMULARIO = {"preenchido": False}
 
     def _valor_nipapel() -> str:
         try:
@@ -1802,6 +1905,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         except Exception:
             pass
         if _colou():
+            _FORMULARIO["preenchido"] = True
             return True
         try:
             page.evaluate(
@@ -1814,6 +1918,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         except Exception:
             pass
         ok = _colou()
+        _FORMULARIO["preenchido"] = ok
         if not ok:
             print("  -> [AVISO] CNPJ nao confirmou no campo apos preencher.")
         return ok
@@ -1951,27 +2056,89 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         print("  -> [AVISO] o popup de perfil continuou na tela.")
         return False
 
+    SEL_BOTAO_ALTERAR = ('#formPJ input[value="Alterar"], '
+                         '#formPJ input[onclick*="validaCaptcha"], '
+                         '#formPJ input[type="submit"]')
+
+    def _formulario_em_envio() -> bool:
+        """A PAGINA ja esta enviando o formulario?
+
+        Os sinais sao os do `[diag]` das trocas que deram certo em producao
+        (27/08/2026): o botao "Alterar" some, e o campo do CNPJ e esvaziado — o
+        ajax da propria pagina ja levou o envio. A resposta (troca ou recusa) as
+        vezes demora mais que a janela de `_enviar_uma_vez` para aparecer, e um
+        clique nesse intervalo e o SEGUNDO envio: o que o eCAC marca como acesso
+        automatizado. So vale depois que o CNPJ confirmou no campo — antes disso,
+        campo vazio e so campo vazio.
+        """
+        if not _FORMULARIO["preenchido"]:
+            return False
+        if not _valor_nipapel().strip():
+            return True
+        try:
+            return not page.locator(SEL_BOTAO_ALTERAR).first.is_visible(timeout=300)
+        except Exception:
+            return False
+
     def _reacao_da_tela() -> str:
-        """O que a tela ja esta dizendo AGORA: "erro", "ok" ou "" (nada ainda)."""
+        """O que a tela ja esta dizendo AGORA: "erro", "ok", "enviando" (a pagina
+        ja levou o envio) ou "" (nada ainda)."""
         if _mensagem_de_erro():
             return "erro"
         if not _popup_aberto():
             return "ok"
+        if _formulario_em_envio():
+            return "enviando"
         return ""
 
     def _clicar_no_alterar() -> None:
         try:
-            page.locator('#formPJ input[value="Alterar"], '
-                         '#formPJ input[onclick*="validaCaptcha"], '
-                         '#formPJ input[type="submit"]').first.click(timeout=5_000)
+            page.locator(SEL_BOTAO_ALTERAR).first.click(timeout=5_000)
             print("  -> [via=clique] clicado (uma vez).")
         except Exception as e:
             print(f"  -> [via=clique] o clique nao confirmou ({type(e).__name__}); "
                   "deixando a tela decidir.")
 
+    _ENVIOS = {"n": 0}
+
     def _clicar_alterar() -> str:
+        _ENVIOS["n"] += 1
+        print(f"Enviando o 'Alterar' (formPJ) — envio {_ENVIOS['n']}...")
         return _enviar_uma_vez(_reacao_da_tela, _clicar_no_alterar,
                                page.wait_for_timeout)
+
+    def _preparar_reenvio(motivo: str) -> None:
+        """A tela pronta para mais um envio.
+
+        Limpa a recusa velha ANTES: senao `_reacao_da_tela` e `_desfecho` leem a
+        .mensagemErro anterior, `_enviar_uma_vez` conclui "a pagina ja reagiu" e
+        NAO envia — o reenvio viraria no-op. So a recusa DO MOTIVO e limpa: uma
+        outra, concorrente (procuracao), fica visivel e continua sendo
+        respeitada. Se o eCAC fechou o popup, ele e aberto de novo; o CNPJ e
+        repreenchido (e o `fill` pode, ele mesmo, levar o envio pela pagina).
+        """
+        marca = {"cnpj_nao_preenchido": "preenchido",
+                 "acesso_automatizado": "acesso automatizado"}.get(motivo)
+        if marca:
+            try:
+                page.evaluate(
+                    "(m) => document.querySelectorAll('.mensagemErro').forEach(e => {"
+                    " const t = (e.textContent || '').toLowerCase();"
+                    " if (t.includes(m)) { e.textContent = ''; e.style.display = 'none'; } })",
+                    marca)
+            except Exception:
+                pass
+        if not _popup_aberto():
+            print("  -> o popup de perfil fechou; abrindo de novo na mesma janela...")
+            _abrir_formulario()
+        _garantir_cnpj_preenchido()
+        page.wait_for_timeout(600)
+
+    def _esperar_s(segundos: float) -> None:
+        """Espera em fatias de 1s, obedecendo o "Parar"."""
+        for _ in range(int(segundos)):
+            _checkpoint()
+            page.wait_for_timeout(1_000)
 
     def _desfecho(timeout_ms: int = 25_000) -> tuple[str, str]:
         """Espera a TELA responder ao unico clique: (estado, mensagem).
@@ -2004,66 +2171,29 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
             except Exception:
                 return "timeout", ""
 
-    # UM envio por passagem. A segunda passagem existe SO para o caso de a tela
-    # nao ter reagido de forma nenhuma — ai o primeiro clique provavelmente nao
-    # chegou ao botao. Qualquer mensagem de erro encerra aqui: nem a procuracao
-    # nem o "acesso automatizado" mudam de resposta com um clique a mais, e no
-    # segundo caso a repeticao e justamente a causa.
-    MAX_ENVIOS_ALTERAR = 2
-    for tentativa_alterar in range(1, MAX_ENVIOS_ALTERAR + 1):
-        # Daqui em diante a falha e DESTA empresa: o CNPJ ja esta no campo.
-        _CHEGOU_NA_TROCA["sim"] = True
-        print(f"Enviando o 'Alterar' (formPJ) — envio {tentativa_alterar} "
-              f"de no maximo {MAX_ENVIOS_ALTERAR}...")
-        via = _clicar_alterar()
+    # Ate o eCAC responder de vez — ver `_enviar_ate_o_desfecho`. Cada envio e UM
+    # so (a pagina, ou um clique se ela nao enviar). "Acesso automatizado" espera
+    # e reenvia NA MESMA janela; "CNPJ nao preenchido" e tela muda, um reenvio;
+    # as demais recusas (procuracao, CNPJ invalido) encerram na hora.
+    #
+    # Daqui em diante a falha e DESTA empresa: o CNPJ ja esta no campo.
+    _CHEGOU_NA_TROCA["sim"] = True
+    estado, erro, via = _enviar_ate_o_desfecho(
+        _clicar_alterar, _desfecho, _preparar_reenvio, _esperar_s,
+        insistencias=insistencias_acesso_automatizado)
 
-        estado, erro = _desfecho()
+    if estado == "erro":
+        registrar_erro(erro)
+        # O `via=` sai junto com a recusa de proposito: e o par
+        # (quem enviou, o que o portal respondeu) que confirma ou derruba a
+        # hipotese de `_enviar_uma_vez` na proxima execucao real.
+        print(f"  -> [RECUSADO pelo eCAC | via={via}] {erro}")
+        # Guardado ANTES de fechar: o popup leva a mensagem embora.
+        _ULTIMA_RECUSA["mensagem"] = erro
+        _fechar_popup()
+        return False
 
-        if estado == "erro":
-            # Recusa por CAMPO VAZIO ('CNPJ nao preenchido') = race do preenchimento
-            # (o valor nao registrou no form antes do envio), NAO e fatal:
-            # repreenche o CNPJ e reenvia. Demais recusas (procuracao, CNPJ
-            # invalido, acesso automatizado) seguem fatais como antes.
-            _msg_low = (erro or "").lower()
-            _campo_vazio = ("cnpj" in _msg_low
-                            and ("não preenchido" in _msg_low or "nao preenchido" in _msg_low))
-            if _campo_vazio and tentativa_alterar < MAX_ENVIOS_ALTERAR:
-                print(f"  -> [RETRIAVEL | via={via}] {erro} — repreenchendo o CNPJ e reenviando...")
-                # Limpa a recusa velha ANTES de reenviar: senao _reacao_da_tela /
-                # _desfecho leem a .mensagemErro anterior, _enviar_uma_vez conclui
-                # "a pagina ja reagiu" e NAO clica — o reenvio viraria no-op.
-                # So a faixa DO CNPJ e limpa: um erro fatal concorrente (procuracao,
-                # acesso automatizado) fica visivel e continua sendo respeitado.
-                try:
-                    page.evaluate(
-                        "() => document.querySelectorAll('.mensagemErro').forEach(e => {"
-                        " const t = (e.textContent || '').toLowerCase();"
-                        " if (t.includes('cnpj') && (t.includes('não preenchido')"
-                        " || t.includes('nao preenchido')))"
-                        " { e.textContent = ''; e.style.display = 'none'; } })")
-                except Exception:
-                    pass
-                _garantir_cnpj_preenchido()
-                page.wait_for_timeout(600)
-                continue
-            registrar_erro(erro)
-            # O `via=` sai junto com a recusa de proposito: e o par
-            # (quem enviou, o que o portal respondeu) que confirma ou derruba a
-            # hipotese de `_enviar_uma_vez` na proxima execucao real.
-            print(f"  -> [RECUSADO pelo eCAC | via={via}] {erro}")
-            # Guardado ANTES de fechar: o popup leva a mensagem embora.
-            _ULTIMA_RECUSA["mensagem"] = erro
-            _fechar_popup()
-            return False
-
-        if estado == "ok":
-            break
-
-        # "timeout": a tela nao disse nem sim nem nao.
-        if tentativa_alterar < MAX_ENVIOS_ALTERAR:
-            print("  -> a tela nao reagiu ao 'Alterar'; um segundo envio, agora "
-                  "bem separado do primeiro.")
-            continue
+    if estado != "ok":
         print("  -> popup NAO fechou: a troca de perfil nao se confirmou.")
         registrar_erro("Troca de perfil nao confirmada: o popup do formPJ "
                        "continuou na tela apos o envio.")

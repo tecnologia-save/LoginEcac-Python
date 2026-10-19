@@ -196,8 +196,37 @@ pela linha de comando com esse nome).
 6. Aguarda o dashboard do eCAC carregar
 7. Clica em "Alterar perfil de acesso"
 8. Preenche o CNPJ e seleciona Procurador de Pessoa Jurídica
+   └── O envio é UM só: a própria página envia ao receber o CNPJ, e o
+       "Alterar" só é clicado se ela não enviar (ver abaixo)
+   └── "Acesso automatizado" na troca: espera 10 s e envia de novo, na MESMA
+       janela, até trocar (teto: 30 vezes)
 9. Retorna (p, context, page) — navegador autenticado e pronto para uso
 ```
+
+### A troca de perfil e o "acesso automatizado"
+
+O e-CAC recusa a troca com *"Não foi possível alterar o perfil de acesso. A
+execução possui atributos que caracteriza acesso automatizado. Tente novamente
+mais tarde"* quando recebe um envio que não veio da própria página. Na execução
+de 27/08/2026, das 29 trocas: com o nosso clique, 0 trocas e 11 recusas; sem
+ele (a página enviando sozinha), 12 trocas e nenhuma. Por isso:
+
+- **um envio por vez** (`_enviar_uma_vez`): a página tem 2,5 s para enviar
+  sozinha; só sem reação o "Alterar" é clicado. Desde a 0.1.15, a página
+  *enviando* (o botão some e o campo do CNPJ é esvaziado pelo ajax dela) também
+  conta como reação: o clique ali seria o segundo envio;
+- **a recusa não fecha nada** (desde a 0.1.15): `garantir_acesso_ecac` espera
+  `ESPERA_ACESSO_AUTOMATIZADO_NA_TROCA_S` (10 s), limpa a recusa da tela,
+  repreenche o CNPJ e envia de novo — na mesma janela, até
+  `INSISTENCIAS_ACESSO_AUTOMATIZADO_NA_TROCA` (30) vezes. Antes, a recusa era
+  fatal: `fazer_login` fechava o navegador e quem chamou abria outro, com login
+  e captcha novos. Por chamada: `garantir_acesso_ecac(..., insistencias_acesso_automatizado=0)`
+  devolve `False` na primeira recusa, como antes.
+
+Não confundir com o **bloqueio do gov.br na tela de login** (*"o seu acesso foi
+bloqueado por possuir atributos que o caracteriza como um acesso
+automatizado"*): esse condena a janela, e `fazer_login` reabre o navegador
+(`AcessoBloqueado`).
 
 ### Domínios cobertos pelo certificado
 
@@ -222,7 +251,8 @@ O certificado é configurado para ser reconhecido em todos os domínios relevant
 | Arquivo `.pfx` não encontrado no caminho informado | Imprime aviso e retorna `None` |
 | CNPJ inválido ou sem procuração eletrônica | Registra no log e retorna `None` |
 | Procuração eletrônica vencida ou inválida | Registra no log e retorna `None` |
-| Acesso automatizado detectado pelo portal | Lança `AcessoBloqueado` |
+| Bloqueio por acesso automatizado na tela de login do gov.br | Reabre o navegador; depois de 2, lança `AcessoBloqueado` |
+| "Acesso automatizado" na troca de perfil | Espera 10 s e reenvia na mesma janela (até 30 vezes); depois, registra no log e retorna `None` |
 | Limite de dispositivos simultâneos atingido | Lança `DispositivosMaximo` |
 | hCaptcha não resolvido após tentativas máximas | Registra no log e retorna `None` |
 | Dashboard do eCAC não carregou | Registra no log e salva screenshot de debug |
