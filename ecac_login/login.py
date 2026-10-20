@@ -942,6 +942,96 @@ def _prova_govbr(page, url_antes: str):
 
 ESPERA_OVERLAY_MS = 10_000      # quanto dar ao overlay modal para sair sozinho
 
+# O aviso "Em breve, o acesso ao e-CAC sera desativado" e o texto do botao que o
+# fecha. Ver `_fechar_aviso_de_encerramento` para o porque de a ancora ser o TEXTO.
+TEXTO_CONTINUAR_NO_ECAC = "Continuar no e-CAC por enquanto"
+ESPERA_AVISO_ENCERRAMENTO_MS = 3_000
+
+
+def _fechar_aviso_de_encerramento(page, espera_ms: int = 0) -> bool:
+    """Fecha o aviso "o e-CAC sera desativado". True quando havia um e ele saiu.
+
+    ANCORADO NO TEXTO DO BOTAO, e nao no id do dialogo. O id
+    (`#dialog-mensagem-encerramento-ecac`) era a unica ancora, e na execucao de
+    20/10/2026 o aviso ficou na tela sem que nada aqui o tenha visto. O que o
+    operador viu foi `<button type="button">Continuar no e-CAC por
+    enquanto</button>` — sem id, sem classe. O texto e o que esse botao tem.
+
+    E uma ESPERA, quando se pode pagar por ela: `is_visible(timeout=...)` nao
+    aguarda visibilidade nenhuma — devolve o estado do instante. O aviso aparece
+    DEPOIS do dashboard, e quem olha uma vez olha antes dele.
+
+    `espera_ms=0` olha uma vez e segue. E assim que ela e chamada antes de cada
+    tentativa de abrir o popup de perfil — uma vez por empresa, onde esperar
+    custaria segundos multiplicados pelo lote inteiro. Depois do login, onde o
+    custo e ruido perto dos dois minutos de certificado e captcha, ela e chamada
+    COM espera.
+
+    NADA aqui sobe. Fechar um aviso cosmetico nao pode ser o motivo de um login
+    inteiro falhar — e a propria RESOLUCAO do locator entra no `try`, nao so a
+    espera: foram os testes da sessao reaproveitada que mostraram isso, com um
+    `page` que nao tinha `get_by_role` e levou um `AttributeError` de dentro
+    desta funcao para fora.
+    """
+    try:
+        botao = page.get_by_role("button", name=TEXTO_CONTINUAR_NO_ECAC).first
+        if espera_ms:
+            botao.wait_for(state="visible", timeout=espera_ms)
+        elif not botao.is_visible():
+            return False
+    except Exception:
+        return False
+
+    print(f"  -> aviso do e-CAC na tela. Clicando em '{TEXTO_CONTINUAR_NO_ECAC}'...")
+    # Tres vias, a mesma acao: papel, texto e DOM. A ultima nao depende de
+    # ponteiro e passa mesmo com outro veu na frente.
+    vias = (
+        lambda: botao.click(timeout=5_000),
+        lambda: page.locator(
+            f'button:has-text("{TEXTO_CONTINUAR_NO_ECAC}")').first.click(timeout=5_000),
+        lambda: page.evaluate(
+            "(t) => { const b = [...document.querySelectorAll('button')]"
+            ".find(e => (e.textContent || '').includes(t)); if (b) b.click(); }",
+            TEXTO_CONTINUAR_NO_ECAC),
+    )
+    for clicar in vias:
+        try:
+            clicar()
+            break
+        except Exception:
+            continue
+    try:
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
+    print("  -> aviso fechado; seguindo para o perfil de acesso.")
+    return True
+
+
+def _popup_fechado_significa(abriu_alguma_vez: bool) -> str:
+    """O que o popup de perfil FECHADO quer dizer: "ok" ou "nao_abriu".
+
+    "Fechado" e o estado do dialogo DEPOIS de uma troca bem-sucedida — e e
+    tambem o estado ANTES de ele abrir. Ler os dois como a mesma coisa custou a
+    execucao de 20/10/2026, em que o dialogo nunca apareceu e o log disse:
+
+        -> nenhum seletor de aba bateu (talvez ja esteja ativa).
+        -> input nao ficou visivel; vai tentar fallback via JS.
+        [diag] inputs do formPJ: todos com visible: False
+        -> [via=pagina] a propria tela enviou o formulario (reacao: ok)
+        -> perfil de acesso alterado (via=pagina).
+
+    A troca foi dada por FEITA sem nunca ter acontecido. O eCAC seguiu no perfil
+    do procurador, as 32 consultas da empresa voltaram vazias e a falha apareceu
+    tres telas adiante, como "o PER/DCOMP Web nao respondeu a nenhuma consulta"
+    — que manda investigar sessao caida, a causa errada.
+
+    Tres sinais na propria tela diziam que o dialogo nao tinha aberto. Nenhum
+    era olhado. Agora um deles decide: sem o dialogo ter estado ABERTO, popup
+    fechado nao e desfecho nenhum.
+    """
+    return "ok" if abriu_alguma_vez else "nao_abriu"
+
 
 def _abrir_popup_de_perfil(page) -> None:
     """Clica em "Alterar perfil de acesso", contornando o overlay modal.
@@ -1806,29 +1896,20 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     # clica em "Continuar no e-CAC por enquanto" e segue o fluxo normalmente; se nao
     # aparecer, apenas segue. NAO retorna (diferente do popup da Caixa Postal, que
     # navega para outra tela): aqui so fechamos o aviso e continuamos para o perfil.
-    try:
-        aviso = page.locator('#dialog-mensagem-encerramento-ecac').first
-        if aviso.is_visible(timeout=2_000):
-            print("  -> popup 'e-CAC sera desativado' detectado. "
-                  "Clicando em 'Continuar no e-CAC por enquanto'...")
-            try:
-                page.get_by_role(
-                    "button", name="Continuar no e-CAC por enquanto"
-                ).first.click(timeout=5_000)
-            except Exception:
-                # Fallback pelo texto do botao (a mesma acao).
-                page.locator(
-                    'button:has-text("Continuar no e-CAC por enquanto")'
-                ).first.click(timeout=5_000)
-            page.wait_for_timeout(800)
-            print("  -> aviso fechado; seguindo para o perfil de acesso.")
-    except Exception:
-        pass
+    # Com ESPERA, porque aqui o aviso ainda esta aparecendo e o custo e ruido.
+    _fechar_aviso_de_encerramento(page, espera_ms=ESPERA_AVISO_ENCERRAMENTO_MS)
+
+    # O dialogo de perfil ESTEVE ABERTO em algum momento? E o que separa "a troca
+    # deu certo" de "o dialogo nunca apareceu" — ver `_popup_fechado_significa`.
+    _DIALOGO = {"abriu": False}
 
     def _abrir_formulario() -> bool:
         """O popup "Alterar perfil de acesso" aberto, na aba PJ, com o campo do
         CNPJ na tela. False quando o formPJ nao aparece. Chamado de novo no
         reenvio do "acesso automatizado" se o eCAC tiver fechado o popup."""
+        # Um aviso na frente do dashboard impede o dialogo de abrir, e ele pode
+        # chegar depois do login. Olhada de custo zero, a cada tentativa.
+        _fechar_aviso_de_encerramento(page)
         print("Clicando em 'Alterar perfil de acesso'...")
         _abrir_popup_de_perfil(page)
 
@@ -1864,6 +1945,9 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         print("Aguardando #txtNIPapel2 ficar visivel...")
         try:
             page.locator("#txtNIPapel2").first.wait_for(state="visible", timeout=10_000)
+            # O UNICO ponto em que se sabe que o dialogo abriu de verdade. Sem
+            # esta marca, "popup fechado" no fim valeria como troca concluida.
+            _DIALOGO["abriu"] = True
         except Exception:
             print("  -> input nao ficou visivel; vai tentar fallback via JS.")
         return True
@@ -1982,10 +2066,16 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
     ]
 
     def _popup_aberto() -> bool:
-        """True enquanto o dialogo de perfil estiver na tela."""
+        """True enquanto o dialogo de perfil estiver na tela.
+
+        Ver o dialogo aberto AQUI tambem marca `_DIALOGO`: o dialogo pode abrir
+        depois da espera de `_abrir_formulario` ter estourado, e o que importa
+        para o desfecho e ele ter aparecido alguma vez, nao em qual linha.
+        """
         for sel in ("#txtNIPapel2", "div.ui-dialog:has(#formPJ)"):
             try:
                 if page.locator(sel).first.is_visible(timeout=500):
+                    _DIALOGO["abriu"] = True
                     return True
             except Exception:
                 continue
@@ -2086,7 +2176,10 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         if _mensagem_de_erro():
             return "erro"
         if not _popup_aberto():
-            return "ok"
+            # Fechado SEM nunca ter aberto nao e reacao a envio nenhum: deixa a
+            # tentativa seguir e quem decide o desfecho e `_desfecho`.
+            estado = _popup_fechado_significa(_DIALOGO["abriu"])
+            return estado if estado == "ok" else ""
         if _formulario_em_envio():
             return "enviando"
         return ""
@@ -2162,7 +2255,7 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
                 return "erro", msg
             fechado = not _popup_aberto()
             if fechado and fechado_antes:
-                return "ok", ""
+                return _popup_fechado_significa(_DIALOGO["abriu"]), ""
             fechado_antes = fechado
             if time.monotonic() >= limite:
                 return "timeout", ""
@@ -2190,6 +2283,17 @@ def garantir_acesso_ecac(page, cnpj: str, *, metrics=None,
         print(f"  -> [RECUSADO pelo eCAC | via={via}] {erro}")
         # Guardado ANTES de fechar: o popup leva a mensagem embora.
         _ULTIMA_RECUSA["mensagem"] = erro
+        _fechar_popup()
+        return False
+
+    if estado == "nao_abriu":
+        # Dito com as palavras do que aconteceu, e nao com as do caso vizinho: o
+        # popup nao "continuou na tela", ele NUNCA apareceu. Quem le isso vai
+        # procurar o que estava na frente do dashboard, que e onde esta a causa.
+        print("  -> o popup de perfil NUNCA apareceu: a troca nao aconteceu.")
+        registrar_erro(
+            "Troca de perfil nao aconteceu: o dialogo do formPJ nunca ficou "
+            "visivel. Costuma ser um aviso do e-CAC na frente do dashboard.")
         _fechar_popup()
         return False
 
