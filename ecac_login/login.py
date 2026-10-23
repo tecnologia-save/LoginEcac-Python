@@ -1414,12 +1414,121 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         return p, context, page
 
 
-def encerrar_sessao(p=None, context=None) -> None:
+# A home do eCAC e o texto do botao de saida. O botao e um
+# `<span class="botaoAzul">Sair com Seguranca </span>` — sem id, com espaco
+# sobrando no fim —, e so existe no portal: no PER/DCOMP Web ele nao esta.
+URL_HOME_ECAC = "https://cav.receita.fazenda.gov.br/ecac/#"
+TEXTO_SAIR_COM_SEGURANCA = "Sair com Segurança"
+ESPERA_SAIR_MS = 8_000
+DOMINIO_DO_ECAC = "cav.receita.fazenda.gov.br"
+
+
+def _no_dominio_do_ecac(page) -> bool:
+    """A pagina esta em algum lugar do eCAC (portal ou PER/DCOMP Web)?
+
+    E a guarda que evita pagar a saida quando nunca se entrou: login que morreu
+    no gov.br para numa URL de `sso.acesso.gov.br`, onde nao ha sessao para
+    encerrar nem botao para clicar.
+    """
+    try:
+        return DOMINIO_DO_ECAC in (page.url or "")
+    except Exception:
+        return False
+
+
+def _clicar_sair(page, espera_ms: int) -> bool:
+    """Clica no "Sair com Seguranca" se ele estiver na tela. Nao navega."""
+    vias = (
+        lambda: page.get_by_text(TEXTO_SAIR_COM_SEGURANCA).first,
+        lambda: page.locator(
+            f'span.botaoAzul:has-text("{TEXTO_SAIR_COM_SEGURANCA}")').first,
+        lambda: page.locator(f'text="{TEXTO_SAIR_COM_SEGURANCA}"').first,
+    )
+    for localizar in vias:
+        try:
+            alvo = localizar()
+            alvo.wait_for(state="visible", timeout=espera_ms)
+            alvo.click(timeout=5_000)
+            return True
+        except Exception:
+            continue
+    # Ultimo recurso, pelo DOM: nao depende de ponteiro e passa com veu na
+    # frente. O `onclick` do span foi compilado pela pagina e roda no contexto
+    # dela, como no `_abrir_popup_de_perfil`.
+    try:
+        clicou = page.evaluate(
+            "(t) => { const e = [...document.querySelectorAll('span, a, button')]"
+            ".find(x => (x.textContent || '').includes(t));"
+            " if (e) { e.click(); return true; } return false; }",
+            TEXTO_SAIR_COM_SEGURANCA)
+        return bool(clicou)
+    except Exception:
+        return False
+
+
+def sair_com_seguranca(page, espera_ms: int = None) -> bool:
+    """Sai do eCAC pelo "Sair com Seguranca". True quando o clique saiu.
+
+    POR QUE SEMPRE, E ANTES DE FECHAR O NAVEGADOR. O certificado tem um numero
+    LIMITADO de perfis logados ao mesmo tempo, e fechar o Chrome nao encerra a
+    sessao do lado da Receita: o perfil continua OCUPADO ate expirar sozinho.
+    Em poucas execucoes nao ha mais vaga, e o relato do operador e sempre o
+    mesmo — "nao entra mais". Sair e o que devolve a vaga.
+
+    NAO ESTANDO VISIVEL, VOLTA PARA A HOME e procura de novo, e este e o caminho
+    NORMAL: a automacao termina no PER/DCOMP Web
+    (`www3.cav.receita.fazenda.gov.br/perdcomp-web`), onde o botao nao existe.
+
+    Nada aqui sobe: a saida e a ultima coisa que se faz com a sessao, e falhar
+    nela nao pode virar exceção em cima de um trabalho que ja acabou. O
+    desfecho vai para o log, porque "saiu" e "nao saiu" tem consequencias
+    diferentes na proxima execucao.
+    """
+    espera_ms = ESPERA_SAIR_MS if espera_ms is None else espera_ms
+    if _clicar_sair(page, espera_ms):
+        print("[sair] 'Sair com Seguranca' clicado.")
+        return True
+
+    print("[sair] botao fora da tela (PER/DCOMP Web?); voltando para a home do eCAC...")
+    try:
+        page.goto(URL_HOME_ECAC, wait_until="domcontentloaded", timeout=30_000)
+    except Exception as e:  # noqa: BLE001 — sem home nao ha botao, e e so isso
+        print(f"[sair] a home do eCAC nao abriu ({type(e).__name__}); "
+              "a sessao vai expirar sozinha.")
+        return False
+
+    if _clicar_sair(page, espera_ms):
+        print("[sair] 'Sair com Seguranca' clicado (depois de voltar para a home).")
+        return True
+    print("[sair] 'Sair com Seguranca' nao foi encontrado nem na home. "
+          "A sessao vai ficar ocupada ate expirar.")
+    return False
+
+
+def encerrar_sessao(p=None, context=None, *, sair: bool = True) -> None:
     """Fecha contexto e para o Playwright. IDEMPOTENTE e sem levantar.
 
     Chamar duas vezes nao pode virar erro: o teardown da execucao e o caminho
     de falha de quem lancou podem alcancar a mesma sessao.
+
+    SAI DO ECAC ANTES DE FECHAR, e por isso a saida vive AQUI: este e o funil
+    por onde todo encerramento passa — o fim normal, o caminho de falha de
+    `main` e o teardown de quem chamou. Pendurar a saida em cada um deles seria
+    garantir que um ficasse de fora, e um que fica de fora e um perfil ocupado.
+
+    So tenta quando a pagina esta no dominio do eCAC: login que morreu no
+    gov.br nao tem sessao para encerrar, e `sair=False` existe para quem sabe
+    que nao ha (teste, ou sessao que o portal ja encerrou).
     """
+    if sair and context is not None:
+        for pagina in _paginas_do_contexto(context):
+            if not _no_dominio_do_ecac(pagina):
+                continue
+            try:
+                if sair_com_seguranca(pagina):
+                    break
+            except Exception:  # noqa: BLE001 — a saida nunca derruba o fechamento
+                pass
     try:
         if context is not None:
             context.close()
@@ -1430,6 +1539,14 @@ def encerrar_sessao(p=None, context=None) -> None:
             p.stop()
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def _paginas_do_contexto(context) -> list:
+    """As abas vivas do contexto. Lista vazia quando nao da para olhar."""
+    try:
+        return [pg for pg in context.pages if not pg.is_closed()]
+    except Exception:
+        return []
 
 
 # A ultima mensagem de recusa que o eCAC mostrou na troca de perfil.

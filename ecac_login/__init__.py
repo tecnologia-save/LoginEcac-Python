@@ -9,6 +9,7 @@ from .login import (
     disco_local_confiavel,
     encerrar_sessao,
     garantir_acesso_ecac,
+    sair_com_seguranca,
     tentou_trocar_perfil,
     ultima_recusa_de_perfil,
 )
@@ -22,5 +23,6 @@ __all__ = ["AcessoBloqueado", "DispositivosMaximo", "LoginCancelado",
            "abrir_browser_com_certificado",
            "dir_perfil_chrome", "disco_local_confiavel",
            "encerrar_sessao", "fazer_login", "garantir_acesso_ecac",
+           "sair_com_seguranca",
            "ultima_recusa_de_perfil", "registrar_gate",
            "tentou_trocar_perfil"]
