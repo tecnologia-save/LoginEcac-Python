@@ -1457,12 +1457,14 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         try:
             context = p.chromium.launch_persistent_context(**launch_kwargs)
         except BaseException:
-            # O LANCAMENTO FALHA, E O DRIVER JA ESTA DE PE. Este `start()` sobe
-            # um processo Node, e sem este `stop()` ele sobrevivia a cada falha
-            # de lancamento — certificado que o OpenSSL recusa, Chrome ausente,
-            # perfil em uso. Cinco execucoes assim em 27/10/2026 deixaram cinco
-            # drivers orfaos na maquina. `sair=False`: nao ha sessao no eCAC
-            # para encerrar, nao ha nem navegador.
+            # O LANCAMENTO FALHA, E O DRIVER JA ESTA DE PE: este `start()` sobe
+            # um processo Node antes de haver navegador. MEDIDO em 27/10/2026:
+            # sem o `stop()` o driver sobrevive a falha e so morre junto com o
+            # processo que o abriu — nao fica orfao na maquina, mas fica vivo
+            # ate o fim da execucao. Numa run de muitas empresas, ou com varias
+            # voltas de lancamento, e um Node acumulado por tentativa recusada.
+            # `sair=False`: nao ha sessao no eCAC para encerrar, nao ha nem
+            # navegador.
             encerrar_sessao(p, None, sair=False)
             raise
         print("Chrome lancado.")

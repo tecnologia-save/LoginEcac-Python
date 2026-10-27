@@ -286,9 +286,12 @@ def test_o_login_entrega_ao_chrome_o_pfx_reempacotado(tmp_path, driver_falso):
 def test_lancamento_que_falha_nao_deixa_driver_orfao(tmp_path, driver_falso):
     """`sync_playwright().start()` sobe um processo Node ANTES do lancamento.
 
-    Sem este `stop()`, cada lancamento recusado — certificado que o OpenSSL nao
-    aceita, Chrome ausente, perfil em uso — deixava um driver vivo na maquina.
-    Em 27/10/2026 foram cinco execucoes seguidas assim.
+    MEDIDO em 27/10/2026: sem o `stop()` o driver sobrevive a falha do
+    lancamento e so morre junto com o processo que o abriu. Nao fica orfao na
+    maquina — fica vivo ate o fim da execucao, e numa run de muitas empresas e
+    um Node acumulado por lancamento recusado (certificado que o OpenSSL nao
+    aceita, Chrome ausente, perfil em uso). Quem lanca fecha, inclusive quando
+    o lancamento falha.
     """
     class _LancamentoRecusado(Exception):
         pass
