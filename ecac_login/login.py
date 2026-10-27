@@ -360,12 +360,75 @@ def _configurar_download(user_data_dir: str) -> None:
     print("[download] Diretorio de download configurado.")
 
 
-def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase):
+def _pkcs12_moderno(cert_pfx_path, cert_pfx_passphrase):
+    """O mesmo par chave+certificado reserializado em PBES2/AES-256, em BYTES.
+
+    POR QUE ISTO EXISTE. Quem apresenta o certificado ao servidor não é o
+    Chrome: é o Node do Playwright, que intercepta o TLS e monta o contexto
+    seguro com o OpenSSL 3 dele. E o OpenSSL 3 recusa as cifras legadas de
+    PKCS#12 — que são exatamente as que a AC brasileira costuma entregar.
+
+    MEDIDO em 27/10/2026, com Patchright 1.60.1, comparando dois certificados
+    reais do mesmo Cofre (só a ESTRUTURA dos arquivos, sem decifrar nada):
+
+        o que funcionava:  PBES2 / PBKDF2-SHA256 / AES-256-CBC, MAC SHA-256
+        o que falhava:     pbeWithSHAAnd40BitRC2-CBC nos certificados,
+                           pbeWithSHAAnd3-KeyTripleDES-CBC na chave, MAC SHA-1
+
+    O segundo derruba o lançamento em menos de um segundo:
+
+        Error: BrowserType.launch_persistent_context: Failed to load client
+        certificate: Unsupported TLS certificate. Most likely, the security
+        algorithm of the given certificate was deprecated by OpenSSL.
+
+    Reproduzido com um `.pfx` sintético de cifra idêntica e resolvido pela
+    conversão: o MESMO par, reserializado em AES-256, lança normalmente. O
+    certificado não muda — muda o empacotamento do arquivo.
+
+    `None` quando não dá para converter: arquivo ausente, senha que não abre,
+    PFX sem chave privada, ou sem senha para reencriptar. Nesses casos o
+    caminho original segue para o Playwright exatamente como antes — a
+    conversão é um GANHO, e não pode virar um jeito novo de falhar.
+
+    NADA É ESCRITO EM DISCO: a API aceita `pfx` em bytes, então a chave
+    convertida vive na memória do processo e morre com ele.
+    """
+    from cryptography.hazmat.primitives.serialization import (
+        BestAvailableEncryption,
+        pkcs12,
+    )
+
+    senha = (cert_pfx_passphrase or "").encode("utf-8")
+    if not senha:
+        # Sem senha não há o que reencriptar mantendo o contrato: a
+        # `passphrase` continua indo para o Playwright, e um PFX que abre sem
+        # senha é um PFX que ele já abre.
+        return None
+    try:
+        bruto = Path(cert_pfx_path).read_bytes()
+        chave, certificado, cadeia = pkcs12.load_key_and_certificates(bruto, senha)
+        if chave is None or certificado is None:
+            return None
+        return pkcs12.serialize_key_and_certificates(
+            b"certificado", chave, certificado, cadeia or None,
+            BestAvailableEncryption(senha))
+    except Exception:  # noqa: BLE001 — qualquer tropeço cai no caminho de antes
+        return None
+
+
+def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase,
+                               cert_pfx_bytes=None):
     """Monta `client_certificates` a partir do PFX recebido por argumento.
 
     Uma entrada por origem: `client_certificates` casa por ORIGEM EXATA, sem
     wildcard. A passphrase é repassada como veio — a API aceita `str | None`, e
     exigir senha não vazia inventaria uma regra que o contrato não tem.
+
+    `cert_pfx_bytes` é o arquivo JÁ convertido por `_pkcs12_moderno`. Vindo
+    preenchido, ele vai como `pfx` e o caminho não é usado; vindo `None`, o
+    `pfxPath` segue como sempre foi. A LEITURA DO ARQUIVO FICA FORA DAQUI de
+    propósito: esta função e `_montar_launch_kwargs` são puras, e é isso que
+    permite conferir a configuração do navegador sem Chrome e sem certificado.
 
     Nota histórica: esta função devolvia `None` incondicionalmente, com a
     justificativa de que `client_certificates` falharia com a cadeia ICP-Brasil
@@ -373,10 +436,10 @@ def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase):
     `AUT-0008` completou o handshake mTLS e chegou à home autenticada do eCAC
     por este exato caminho, com Patchright 1.60.1.
     """
+    arquivo = ({"pfx": cert_pfx_bytes} if cert_pfx_bytes
+               else {"pfxPath": str(cert_pfx_path)})
     return [
-        {"origin": origin,
-         "pfxPath": str(cert_pfx_path),
-         "passphrase": cert_pfx_passphrase}
+        {"origin": origin, **arquivo, "passphrase": cert_pfx_passphrase}
         for origin in CERT_ORIGINS
     ]
 
@@ -384,11 +447,13 @@ def _build_client_certificates(cert_pfx_path, cert_pfx_passphrase):
 def _montar_launch_kwargs(user_data_dir: str, *,
                           cert_pfx_path=None,
                           cert_pfx_passphrase=None,
-                          cert_subject_cn: str | None = None) -> dict:
+                          cert_subject_cn: str | None = None,
+                          cert_pfx_bytes=None) -> dict:
     """Monta os kwargs de lançamento do Chrome. Função PURA.
 
     Não abre navegador, não toca filesystem e não lê segredo — existe para que a
-    configuração de certificado seja testável sem Chrome.
+    configuração de certificado seja testável sem Chrome. Quem lê o `.pfx` é
+    `_pkcs12_moderno`, e o resultado chega aqui em `cert_pfx_bytes`.
 
     Dois modos, mutuamente exclusivos. Quem escolhe é a PRESENÇA de
     `cert_pfx_path`, nunca a senha: deixar a passphrase decidir faria um pedido
@@ -445,7 +510,7 @@ def _montar_launch_kwargs(user_data_dir: str, *,
             "ou omita o parametro para usar o Windows Certificate Store.")
 
     kwargs["client_certificates"] = _build_client_certificates(
-        cert_pfx_path, cert_pfx_passphrase)
+        cert_pfx_path, cert_pfx_passphrase, cert_pfx_bytes)
     return kwargs
 
 
@@ -1350,15 +1415,25 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
     os.makedirs(user_data_dir, exist_ok=True)
 
     _configurar_download(user_data_dir)
+    # O PFX é reempacotado em AES ANTES de montar os kwargs: o OpenSSL 3 do
+    # Node recusa as cifras legadas da AC brasileira e derruba o lançamento —
+    # ver `_pkcs12_moderno`. Não convertendo, segue o caminho original.
+    pfx_convertido = (_pkcs12_moderno(cert_pfx_path, cert_pfx_passphrase)
+                      if cert_pfx_path else None)
     launch_kwargs = _montar_launch_kwargs(
         user_data_dir,
         cert_pfx_path=cert_pfx_path,
         cert_pfx_passphrase=cert_pfx_passphrase,
         cert_subject_cn=cert_subject_cn,
+        cert_pfx_bytes=pfx_convertido,
     )
     # Só o MODO, nunca o valor: caminho do .pfx, senha, CN e serial não vão para o log.
     print("[cert] Modo PFX explicito." if cert_pfx_path is not None
           else "[cert] Modo Windows Certificate Store.")
+    if cert_pfx_path is not None:
+        print("[cert] PKCS#12 reempacotado em AES-256 para o lancamento."
+              if pfx_convertido else
+              "[cert] PKCS#12 entregue como esta (sem reempacotar).")
 
     # Quem LANCA fecha. Ponto unico: antes, cada caminho de falha decidia por si
     # se fechava, e alguns nao fechavam — o Chrome ficava vivo segurando o
@@ -1379,7 +1454,17 @@ def main(cnpj: str, project_dir: Path | str = None, metrics=None, policy_ok: boo
         _abortar_se_pedido()
         p = sync_playwright().start()
         print("Lancando Chrome...")
-        context = p.chromium.launch_persistent_context(**launch_kwargs)
+        try:
+            context = p.chromium.launch_persistent_context(**launch_kwargs)
+        except BaseException:
+            # O LANCAMENTO FALHA, E O DRIVER JA ESTA DE PE. Este `start()` sobe
+            # um processo Node, e sem este `stop()` ele sobrevivia a cada falha
+            # de lancamento — certificado que o OpenSSL recusa, Chrome ausente,
+            # perfil em uso. Cinco execucoes assim em 27/10/2026 deixaram cinco
+            # drivers orfaos na maquina. `sair=False`: nao ha sessao no eCAC
+            # para encerrar, nao ha nem navegador.
+            encerrar_sessao(p, None, sair=False)
+            raise
         print("Chrome lancado.")
 
         page = context.pages[0] if context.pages else context.new_page()
